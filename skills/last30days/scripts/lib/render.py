@@ -107,7 +107,9 @@ def _format_discovery_engagement(
 def render_discovery(report: schema.DiscoveryReport) -> str:
     """Render a compact topic-per-section discovery brief."""
     title = (
-        f"# Trending discovery: {report.domain}" if report.domain else "# Trending now"
+        f"# Trending discovery: {_safe_title(report.domain)}"
+        if report.domain
+        else "# Trending now"
     )
     lines = [
         *_render_badge(),
@@ -136,7 +138,8 @@ def render_discovery(report: schema.DiscoveryReport) -> str:
             if report.weak_signal:
                 lines.extend(
                     [
-                        f"Closest weak signal: {report.weak_signal} (sub-floor; "
+                        "Closest weak signal: "
+                        f"{_safe_title(report.weak_signal)} (sub-floor; "
                         "single-source or too little engagement).",
                         "",
                     ]
@@ -152,18 +155,18 @@ def render_discovery(report: schema.DiscoveryReport) -> str:
         )
         lines.extend(
             [
-                f"## {topic.rank}. {topic.name}",
+                f"## {topic.rank}. {_safe_title(topic.name)}",
                 "",
                 f"**Momentum:** {momentum} · velocity {topic.velocity_score:,.2f}{confirmation}",
                 "",
-                topic.why_spiking,
+                _safe_title(topic.why_spiking),
                 "",
             ]
         )
         if topic.top_comment:
             lines.extend(
                 [
-                    f"**Community voice:** {topic.top_comment}",
+                    f"**Community voice:** {_safe_title(topic.top_comment)}",
                     "",
                 ]
             )
@@ -203,14 +206,14 @@ def render_discovery(report: schema.DiscoveryReport) -> str:
             [
                 f"**Evidence:** {_format_discovery_engagement(topic.engagement_by_source)}",
                 "",
-                f"**Research next:** `{topic.command}`",
+                f"**Research next:** `{_safe_code_span(topic.command)}`",
                 "",
             ]
         )
 
     if report.warnings:
         lines.extend(["### Coverage notes", ""])
-        lines.extend(f"- {warning}" for warning in report.warnings)
+        lines.extend(f"- {_safe_title(warning)}" for warning in report.warnings)
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -595,6 +598,21 @@ def _defang_corpus_sentinels(value: str) -> str:
     return value.replace("LAST30DAYS_PRIVATE_CORPUS", "LAST30DAYS_PRIVATE-CORPUS")
 
 
+# C0 and C1 controls (keeping \t and \n, which carry snippet structure), plus
+# the invisible formatting ranges. An ESC sequence can retitle or clear the
+# user's terminal in direct-CLI output; a bidi override (U+202E and friends)
+# reorders the rendered line, so a cited domain reads as a different one than
+# the URL actually says. Both survive whitespace collapsing, so they are
+# stripped rather than collapsed.
+_CONTROL_CHARS_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f"  # C0/C1, minus tab and newline
+    "\u200b-\u200f"  # zero-width space/joiners, LRM/RLM
+    "\u202a-\u202e"  # bidi embedding and override
+    "\u2066-\u2069"  # bidi isolates
+    "\ufeff]"  # BOM / zero-width no-break space
+)
+
+
 def _defang_engine_sentinels(value: str) -> str:
     """Source content must not be able to forge the engine's own block markers.
 
@@ -606,7 +624,11 @@ def _defang_engine_sentinels(value: str) -> str:
     (backtick and tilde, the two CommonMark fence characters) is what actually
     neutralizes them; the phrase substitutions are defense in depth for a model
     that pattern-matches on the wording rather than the syntax.
+
+    Terminal and display control characters are removed here too, so every
+    caller of this one choke point inherits the guard.
     """
+    value = _CONTROL_CHARS_RE.sub("", value)
     return (
         value.replace("<!--", "<!- -")
         .replace("-->", "- ->")
@@ -627,8 +649,24 @@ def _safe_title(title: str) -> str:
     one can open its own markdown blocks or forge the sentinels above.
     Collapsing whitespace first is what keeps the title on the line the
     caller built for it.
+
+    The same treatment applies to any scraped prose interpolated into
+    engine-authored structure on a single line -- a community comment, a
+    cluster name, a justification string -- not just to titles.
     """
     return _defang_engine_sentinels(" ".join(title.split()))
+
+
+def _safe_code_span(value: str) -> str:
+    """Keep a value from closing the single-backtick span it is rendered in.
+
+    ``--discover`` composes ``/last30days "<topic name>"`` and the name is
+    scraped, so a backtick inside it would end the code span and leave the
+    remainder to parse as markdown -- a live link, in a brief the host model
+    relays verbatim. Triple runs are already handled by the defang above; this
+    covers the single-character case.
+    """
+    return _defang_engine_sentinels(value).replace("`", "'")
 
 
 _FRESHNESS_PRIORITY = {
