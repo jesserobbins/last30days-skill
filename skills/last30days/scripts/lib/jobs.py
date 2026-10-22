@@ -142,11 +142,17 @@ def _is_fetchable_url(url: str) -> bool:
 
     Hostnames are resolved and rejected when any answer is non-global, which
     closes the cheap case of an attacker-owned name whose A record points at
-    127.0.0.1. Resolution failure fails open -- an unresolvable host cannot be
-    fetched, and keeping the predicate total keeps offline runs independent of
-    DNS. This is a pre-flight check, not a pin: it does not constrain the
-    address urllib connects to, so a rebinding window between this lookup and
-    the fetch remains.
+    127.0.0.1. A transient resolution failure fails open -- an unresolvable
+    host cannot be fetched, and keeping the predicate total keeps offline runs
+    independent of DNS -- while an invalid label is rejected, because it can
+    never be fetched safely.
+
+    This predicate is only ever passed as ``http``'s ``validate_url``, which
+    does two things: it rejects redirect hops that fail it, and it makes the
+    request connect only to an address resolved and approved at connect time
+    (``http._pinned_create_connection``). The pre-flight resolution here is
+    therefore a filter, not the guarantee -- the pin is what closes the
+    rebinding window, and removing it would reopen that window.
     """
     try:
         parsed = urlparse(url)

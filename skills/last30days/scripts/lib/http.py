@@ -164,60 +164,79 @@ def _is_globally_reachable(address: str) -> bool:
     return bool(parsed.is_global) and not parsed.is_multicast
 
 
-class _PinnedConnectionMixin:
-    """Connect only to an address this process approved.
+def _pinned_create_connection(address, timeout=None, source_address=None):
+    """``socket.create_connection`` that dials only approved addresses.
 
     Validating the *name* before the fetch leaves a rebinding window: the
-    lookup that cleared the URL and the lookup http.client performs when it
+    lookup that cleared the URL and the lookup ``http.client`` performs when it
     connects are separate, so an attacker-controlled zone can answer publicly
-    for the first and with 127.0.0.1 for the second. Resolving here and
-    connecting only to an approved address closes that window. The original
-    hostname still drives the ``Host`` header and TLS SNI, so certificate
-    verification is unchanged.
+    for the first and with 127.0.0.1 for the second. Resolving here, filtering,
+    and connecting only to what survives closes that window.
 
-    ``_create_connection`` is the stdlib's own hook (socket.create_connection),
-    so the timeout and ``source_address`` behaviour match http.client.
+    Every approved answer is tried in the order getaddrinfo returned it, and a
+    rejected answer is never a fallback -- that is what makes this different
+    from plain ``create_connection``. The host name is *not* substituted: it
+    still drives the ``Host`` header and the TLS ``server_hostname``, so
+    certificate verification is untouched.
+
+    This replaces http.client's per-instance ``_create_connection`` hook
+    rather than overriding ``connect``, because ``HTTPSConnection.connect`` is
+    where ``self._context.wrap_socket(...)`` happens. Overriding ``connect``
+    drops TLS entirely.
+    """
+    host, port = address
+    try:
+        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as error:
+        raise urllib.error.URLError(
+            f"could not resolve {host}: {error}"
+        ) from error
+    approved = [
+        info for info in infos if _is_globally_reachable(info[4][0].split("%")[0])
+    ]
+    if not approved:
+        raise urllib.error.URLError(
+            f"refusing to connect to a non-public address for {host}"
+        )
+    failures: list[OSError] = []
+    for family, socktype, proto, _canonname, sockaddr in approved:
+        sock = socket.socket(family, socktype, proto)
+        try:
+            if timeout is not None:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as error:
+            failures.append(error)
+            sock.close()
+    raise failures[-1]
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that resolves and filters at connect time."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_create_connection
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that resolves and filters at connect time.
+
+    Only the connection hook is replaced. ``HTTPSConnection.connect`` still
+    runs, so the socket is wrapped with the request's SSL context and the
+    original hostname as ``server_hostname``.
     """
 
-    def connect(self):
-        try:
-            infos = socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM)
-        except (OSError, UnicodeError) as error:
-            raise urllib.error.URLError(
-                f"could not resolve {self.host}: {error}"
-            ) from error
-        approved = [
-            info
-            for info in infos
-            if _is_globally_reachable(info[4][0].split("%")[0])
-        ]
-        if not approved:
-            raise urllib.error.URLError(
-                f"refusing to connect to a non-public address for {self.host}"
-            )
-        # First approved answer only: never fall back to a rejected one.
-        _family, _socktype, _proto, _canonname, sockaddr = approved[0]
-        self.sock = self._create_connection(
-            sockaddr, self.timeout, self.source_address
-        )
-        if self._tunnel_host:
-            self._tunnel()
-
-
-class _PinnedHTTPConnection(
-    _PinnedConnectionMixin, getattr(http.client, "HTTPConnection")
-):
-    pass
-
-
-class _PinnedHTTPSConnection(
-    _PinnedConnectionMixin, getattr(http.client, "HTTPSConnection")
-):
-    pass
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_create_connection
 
 
 class _PinnedHTTPHandler(urllib.request.HTTPHandler):
-    """HTTPHandler that only uses the pinned connection on validator requests."""
+    """HTTPHandler that pins only the requests that carry a validator."""
 
     def http_open(self, req):
         if getattr(req, "last30days_url_validator", None) is None:
@@ -229,9 +248,28 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
         if getattr(req, "last30days_url_validator", None) is None:
             return super().https_open(req)
-        return self.do_open(
-            _PinnedHTTPSConnection, req, context=self._context
-        )
+        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
+
+
+def _proxy_applies(url: str) -> bool:
+    """True when urllib would route this URL through a proxy.
+
+    Pinning cannot survive a proxy (the socket goes to the proxy, which does
+    its own resolution), so the pinned opener is only used for requests that
+    go direct. This asks urllib the same question it asks itself: the
+    environment *and* the platform's system proxy settings, honoured
+    per-scheme and subject to NO_PROXY.
+    """
+    try:
+        proxies = urllib.request.getproxies()
+        scheme = urlsplit(url).scheme.lower()
+        if scheme not in proxies:
+            return False
+        hostname = urlsplit(url).hostname or ""
+        return not urllib.request.proxy_bypass(hostname)
+    except Exception:
+        # Any doubt means "a proxy might apply", which is the non-pinning path.
+        return True
 
 
 _opener = urllib.request.build_opener(_StripAuthOnCrossOriginRedirect)
@@ -254,23 +292,15 @@ def _open_request(req, timeout, *, bypass_proxy=False):
     current = urllib.request.urlopen
     if current is not _DEFAULT_URLOPEN:
         return current(req, timeout=timeout)
-    if getattr(req, "last30days_url_validator", None) is not None:
+    if getattr(req, "last30days_url_validator", None) is not None and (
+        bypass_proxy or not _proxy_applies(req.full_url)
+    ):
         # Pin the connection to an approved address. A proxy would make the
-        # pin meaningless (the socket goes to the proxy), so a proxied
-        # environment keeps the validated-name behaviour instead.
-        if bypass_proxy or not _proxy_configured():
-            return _pinned_opener.open(req, timeout=timeout)
+        # pin meaningless (the socket goes to the proxy, which resolves the
+        # name itself), so only direct requests are pinned.
+        return _pinned_opener.open(req, timeout=timeout)
     opener = _direct_opener if bypass_proxy else _opener
     return opener.open(req, timeout=timeout)
-
-
-def _proxy_configured() -> bool:
-    """True when the environment routes HTTP(S) through a proxy."""
-    return any(
-        os.environ.get(name)
-        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                     "ALL_PROXY", "all_proxy")
-    )
 
 
 def open_request(req, timeout):

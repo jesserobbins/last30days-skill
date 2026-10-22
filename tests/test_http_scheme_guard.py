@@ -175,42 +175,150 @@ class PinnedAddressTest(unittest.TestCase):
     first and with a loopback address for the real connection.
     """
 
-    def test_connection_refuses_a_non_public_answer(self):
-        """Second lookup returning 127.0.0.1 must not be dialled."""
+    V4 = ("93.184.216.34", 443)
+    V6 = ("2606:2800:220:1:248:1893:25c8:1946", 443, 0, 0)
+
+    def _infos(self, *addrs):
         import socket
 
-        connection = http._PinnedHTTPSConnection("careers.attacker.example", timeout=5)
-        dialled: list = []
+        family = {2: socket.AF_INET, 4: socket.AF_INET6}
+        return [
+            (family[len(addr)], socket.SOCK_STREAM, 6, "", addr) for addr in addrs
+        ]
 
-        def rebound(host, *args, **kwargs):
-            return [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
-            ]
+    def test_https_connection_still_wraps_in_tls(self):
+        """The regression the first attempt shipped: no TLS handshake at all.
 
-        connection._create_connection = lambda *a, **k: dialled.append(a) or mock.MagicMock()
-        with mock.patch.object(http.socket, "getaddrinfo", side_effect=rebound):
-            with pytest.raises(urllib.error.URLError):
-                connection.connect()
-        assert dialled == [], "a loopback address was dialled"
-
-    def test_connection_dials_the_public_answer(self):
-        import socket
-
+        Overriding connect() on the mixin dropped HTTPSConnection.connect,
+        which is the only place wrap_socket runs, so requests went out as
+        plaintext to port 443.
+        """
         connection = http._PinnedHTTPSConnection("careers.example", timeout=5)
-        dialled: list = []
-        connection._create_connection = lambda *a, **k: dialled.append(a) or mock.MagicMock()
+        sock = mock.MagicMock()
+        context = mock.MagicMock()
+        context.wrap_socket.return_value = mock.MagicMock()
+        connection._context = context
 
         with mock.patch.object(
-            http.socket, "getaddrinfo",
-            return_value=[
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443)),
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
-            ],
-        ):
+            http.socket, "getaddrinfo", return_value=self._infos(self.V4)
+        ), mock.patch.object(http.socket, "socket", return_value=sock):
             connection.connect()
 
-        assert dialled == [(("93.184.216.34", 443), 5, None)], dialled
+        context.wrap_socket.assert_called_once_with(
+            sock, server_hostname="careers.example"
+        )
 
-    def test_hostname_is_preserved_for_the_host_header(self):
-        connection = http._PinnedHTTPSConnection("careers.example", timeout=5)
-        assert connection.host == "careers.example"
+    def test_ipv6_answer_is_dialled_with_its_own_sockaddr(self):
+        """A 4-tuple sockaddr must not be fed to socket.create_connection."""
+        connection = http._PinnedHTTPConnection("careers.example", timeout=5)
+        dialled: list = []
+
+        def fake_socket(*args):
+            sock = mock.MagicMock()
+            sock.connect.side_effect = lambda addr: dialled.append(addr)
+            return sock
+
+        with mock.patch.object(
+            http.socket, "getaddrinfo", return_value=self._infos(self.V6, self.V4)
+        ), mock.patch.object(http.socket, "socket", side_effect=fake_socket):
+            connection.connect()
+
+        assert dialled == [self.V6], dialled
+
+    def test_first_answer_failing_falls_back_to_the_next(self):
+        import errno
+
+        connection = http._PinnedHTTPConnection("careers.example", timeout=5)
+        dialled: list = []
+
+        def fake_socket(*args):
+            sock = mock.MagicMock()
+
+            def connect(addr):
+                dialled.append(addr)
+                if len(dialled) == 1:
+                    raise OSError(errno.ENETUNREACH, "no route to host")
+
+            sock.connect.side_effect = connect
+            return sock
+
+        with mock.patch.object(
+            http.socket, "getaddrinfo", return_value=self._infos(self.V6, self.V4)
+        ), mock.patch.object(http.socket, "socket", side_effect=fake_socket):
+            connection.connect()
+
+        assert dialled == [self.V6, self.V4], dialled
+
+    def test_non_public_answer_is_refused(self):
+        """A rebinding answer must never be dialled, and never be a fallback."""
+        import socket
+
+        connection = http._PinnedHTTPConnection("careers.example", timeout=5)
+        dialled: list = []
+
+        with mock.patch.object(
+            http.socket,
+            "getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+            ],
+        ), mock.patch.object(
+            http.socket, "socket", side_effect=lambda *a: dialled.append(a) or mock.MagicMock()
+        ):
+            with pytest.raises(urllib.error.URLError):
+                connection.connect()
+        assert dialled == [], "a non-public address was dialled"
+
+    def test_rejected_answer_is_not_used_as_a_fallback(self):
+        import socket
+
+        connection = http._PinnedHTTPConnection("careers.example", timeout=5)
+        dialled: list = []
+
+        def fake_socket(*args):
+            sock = mock.MagicMock()
+            sock.connect.side_effect = lambda addr: dialled.append(addr)
+            return sock
+
+        with mock.patch.object(
+            http.socket,
+            "getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80)),
+            ],
+        ), mock.patch.object(http.socket, "socket", side_effect=fake_socket):
+            with pytest.raises(urllib.error.URLError):
+                connection.connect()
+        assert dialled == []
+
+
+class ProxyAwarenessTest(unittest.TestCase):
+    """Pinning is only meaningful for requests that actually go direct."""
+
+    def test_no_proxy_means_pin(self):
+        with mock.patch.object(http.urllib.request, "getproxies", return_value={}):
+            assert http._proxy_applies("https://careers.example/jobs") is False
+
+    def test_scheme_specific_proxy_disables_pinning(self):
+        # HTTPS_PROXY must not disable pinning for an http:// URL.
+        with mock.patch.object(
+            http.urllib.request, "getproxies", return_value={"https": "http://proxy:3128"}
+        ):
+            assert http._proxy_applies("http://careers.example/jobs") is False
+            assert http._proxy_applies("https://careers.example/jobs") is True
+
+    def test_no_proxy_exclusion_disables_pinning(self):
+        with mock.patch.object(
+            http.urllib.request, "getproxies", return_value={"https": "http://proxy:3128"}
+        ), mock.patch.object(
+            http.urllib.request, "proxy_bypass", return_value=True
+        ):
+            assert http._proxy_applies("https://careers.example/jobs") is False
+
+    def test_system_proxy_without_env_vars_is_honoured(self):
+        # getproxies() reads platform settings too, which os.environ does not.
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            http.urllib.request, "getproxies", return_value={"https": "http://sys:3128"}
+        ), mock.patch.object(http.urllib.request, "proxy_bypass", return_value=False):
+            assert http._proxy_applies("https://careers.example/jobs") is True

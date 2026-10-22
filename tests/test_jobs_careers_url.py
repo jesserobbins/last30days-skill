@@ -127,13 +127,20 @@ def test_long_company_name_skips_the_candidate_without_raising(monkeypatch):
 
 
 def test_unparsable_resolved_address_is_rejected(monkeypatch):
-    """An address we cannot classify is not one we fetch (fail closed)."""
+    """An answer ipaddress cannot parse is not one we fetch (fail closed).
+
+    The returned address is deliberately not an address at all: ipaddress
+    parses scoped literals such as "fe80::1%eth0" fine, so using one would
+    exercise the is_global path instead of this fail-closed branch.
+    """
     import socket as socket_mod
 
     monkeypatch.setattr(
         jobs.socket,
         "getaddrinfo",
-        lambda host, *a, **k: [(socket_mod.AF_INET6, socket_mod.SOCK_STREAM, 6, "", ("fe80::1%eth0", 0, 0, 0))],
+        lambda host, *a, **k: [
+            (socket_mod.AF_INET, socket_mod.SOCK_STREAM, 6, "", ("not-an-address", 0))
+        ],
     )
     assert jobs._is_fetchable_url("http://careers.example/jobs") is False
 
