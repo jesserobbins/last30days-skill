@@ -10,7 +10,7 @@ import os as real_os
 import platform
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from lib import subproc
 
@@ -457,6 +457,8 @@ time.sleep(15)
             timeout=2,
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            # taskkill gets the same allowlisted env as every other child.
+            env=ANY,
         )
 
         with patch.object(subproc.subprocess, "run", side_effect=subprocess.TimeoutExpired("taskkill", 2)):

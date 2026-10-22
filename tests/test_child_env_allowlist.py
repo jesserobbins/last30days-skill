@@ -144,6 +144,15 @@ def test_config_dir_vars_are_forwarded():
     assert "OPENAI_API_KEY" not in env
 
 
+def test_brightdata_drops_a_blank_ambient_key_variable():
+    """A blank X= in the environment must not become a present variable."""
+    from lib import brightdata
+
+    with mock.patch.dict("os.environ", {brightdata.API_KEY_ENV: ""}, clear=False):
+        env = brightdata._child_env("")
+    assert brightdata.API_KEY_ENV not in env
+
+
 def test_brightdata_omits_an_empty_key_variable():
     from lib import brightdata
 
@@ -220,7 +229,11 @@ def test_other_children_are_also_scoped(module_name, call):
 
     with mock.patch.dict("os.environ", SECRETS, clear=False), mock.patch(
         "shutil.which", side_effect=lambda name: f"/usr/bin/{name}"
-    ), mock.patch("subprocess.run", side_effect=fake_run):
+    ), mock.patch("subprocess.run", side_effect=fake_run), mock.patch(
+        # env._load_keychain returns early on non-Darwin; CI runs ubuntu, so
+        # the platform has to be forced for the call site to be exercised.
+        "platform.system", return_value="Darwin"
+    ):
         try:
             call(module)
         except Exception:
@@ -231,6 +244,73 @@ def test_other_children_are_also_scoped(module_name, call):
         assert child_env is not None, f"{module_name} child inherited the environment"
         for name in SECRETS:
             assert name not in child_env, f"{name} leaked to a {module_name} child"
+
+
+@pytest.mark.parametrize(
+    "module_name, call",
+    [
+        ("digg", lambda m: m._invoke_cli(["search", "x"], 30)),
+        ("arxiv", lambda m: m._run_cli(["search", "x"], 30)),
+        ("techmeme", lambda m: m._run_cli(["search", "x"], 30)),
+        ("trustpilot", lambda m: m._run_cli(["search", "x"], 30)),
+        ("transcribe", lambda m: m._run(["ffmpeg", "-version"], 10)),
+        ("youtube_yt", lambda m: m._run_ytdlp(["yt-dlp", "--version"], timeout=5)),
+    ],
+)
+def test_network_cli_children_are_scoped(module_name, call):
+    """The Printing Press CLIs, yt-dlp and ffmpeg are not this repo's code."""
+    import importlib
+
+    module = importlib.import_module(f"lib.{module_name}")
+    captured: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(kwargs.get("env"))
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    with mock.patch.dict("os.environ", SECRETS, clear=False), mock.patch(
+        "shutil.which", side_effect=lambda name: f"/usr/bin/{name}"
+    ), mock.patch.object(module.subproc, "run_with_timeout", side_effect=fake_run):
+        try:
+            call(module)
+        except Exception:
+            pass
+
+    assert captured, f"{module_name} spawned no child"
+    # The ssh-wrapped yt-dlp lane needs the agent socket; that is the only
+    # ambient credential any of these tools is allowed to keep.
+    allowed = {"SSH_AUTH_SOCK"} if module_name == "youtube_yt" else set()
+    for child_env in captured:
+        assert child_env is not None, f"{module_name} child inherited the environment"
+        for name in SECRETS:
+            if name in allowed:
+                continue
+            assert name not in child_env, f"{name} leaked to a {module_name} child"
+
+
+def test_xurl_children_are_scoped():
+    from lib import xurl_x
+
+    captured: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(kwargs.get("env"))
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    with mock.patch.dict("os.environ", SECRETS, clear=False), mock.patch.object(
+        xurl_x.subprocess, "run", side_effect=fake_run
+    ):
+        xurl_x._is_available_uncached()
+        try:
+            xurl_x.search("query", depth="quick", config={})
+        except Exception:
+            pass
+
+    assert captured
+    for child_env in captured:
+        assert child_env is not None, "xurl child inherited the environment"
+        for name in SECRETS:
+            assert name not in child_env
 
 
 def test_health_probe_is_scoped():

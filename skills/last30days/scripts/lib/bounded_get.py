@@ -89,6 +89,9 @@ def get(
             input_text=json.dumps(payload),
             cancel=cancel,
             cleanup_grace=CLEANUP_GRACE_SECONDS,
+            # Our own isolated child: it needs the fixture/replay config it
+            # already honoured, and nothing else from the parent.
+            env=subproc.child_env(prefix_allow=("LAST30DAYS_",)),
         )
     except subproc.SubprocTimeout as exc:
         raise GetTimeout("GET exceeded operation deadline or was cancelled", started=exc.started) from exc

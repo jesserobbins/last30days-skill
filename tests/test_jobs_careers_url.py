@@ -35,6 +35,10 @@ def _search_result(url: str) -> list[dict]:
         # Carrier-grade NAT (100.64.0.0/10) holds Alibaba Cloud's metadata
         # endpoint; ipaddress.is_private is False for it.
         "http://100.100.100.200/latest/meta-data/careers",
+        # Scoped literals: ipaddress cannot parse a scope id, so these used to
+        # fall through to the resolver branch and be accepted.
+        "http://[fe80::1%25eth0]/careers",
+        "http://[::1%251]/careers",
         # Non-canonical numeric spellings that ipaddress rejects but the
         # resolver still honours.
         "http://127.1/jobs",
@@ -91,6 +95,38 @@ def test_unresolvable_hostname_does_not_block_the_fetch(monkeypatch):
 
     monkeypatch.setattr(jobs.socket, "getaddrinfo", broken)
     assert jobs._is_fetchable_url("http://careers.example/jobs") is True
+
+
+def test_unparsable_resolved_address_is_rejected(monkeypatch):
+    """An address we cannot classify is not one we fetch (fail closed)."""
+    import socket as socket_mod
+
+    monkeypatch.setattr(
+        jobs.socket,
+        "getaddrinfo",
+        lambda host, *a, **k: [(socket_mod.AF_INET6, socket_mod.SOCK_STREAM, 6, "", ("fe80::1%eth0", 0, 0, 0))],
+    )
+    assert jobs._is_fetchable_url("http://careers.example/jobs") is False
+
+
+def test_non_careers_results_cost_no_dns_lookup(monkeypatch):
+    """The address check resolves hostnames, so it must run after the token filter."""
+    calls: list[str] = []
+
+    def counting_getaddrinfo(host, *args, **kwargs):
+        calls.append(host)
+        raise OSError("resolution should not be attempted for this result")
+
+    monkeypatch.setattr(jobs.socket, "getaddrinfo", counting_getaddrinfo)
+    results = [
+        {"title": "unrelated", "url": "https://news.example/politics"},
+        {"title": "unrelated 2", "url": "https://blog.example/post"},
+    ]
+    with mock.patch.object(jobs.grounding, "web_search", return_value=(results, {})):
+        assert jobs._search_for_careers_url(
+            "Acme", ("2026-01-01", "2026-01-31"), {}, backend="duckduckgo"
+        ) is None
+    assert calls == []
 
 
 def test_malformed_search_hit_does_not_abort_the_probe(monkeypatch):

@@ -152,6 +152,11 @@ def _is_fetchable_url(url: str) -> bool:
         return False
     if not host:
         return False
+    if "%" in host:
+        # A scope id ("fe80::1%eth0", "::1%1") is a link-local/loopback
+        # address that ipaddress cannot parse, so it would otherwise fall
+        # through to the resolver branch below.
+        return False
     if host in _LOCAL_HOSTNAMES or host.endswith(_PRIVATE_HOST_SUFFIXES):
         return False
     try:
@@ -195,7 +200,8 @@ def _resolves_to_public(host: str) -> bool:
         try:
             address = ipaddress.ip_address(info[4][0])
         except (ValueError, IndexError, TypeError):
-            continue
+            # An address this process cannot classify is not one to fetch.
+            return False
         if not _is_public_address(address):
             return False
     return True
@@ -267,13 +273,16 @@ def _search_for_careers_url(
         url = str(raw.get("url") or "").strip()
         if not url:
             continue
-        if not _is_fetchable_url(url):
-            continue
         lowered = url.lower()
-        if any(token in lowered for token in (
+        if not any(token in lowered for token in (
             "career", "/jobs", "ashbyhq", "greenhouse", "lever.co", "workable", "smartrecruiters",
         )):
-            return url
+            continue
+        # The address check resolves hostnames, so it runs only on candidates
+        # that already look like careers pages -- not once per search result.
+        if not _is_fetchable_url(url):
+            continue
+        return url
     return None
 
 

@@ -194,7 +194,11 @@ def _search_timeout() -> float:
 def _run_ytdlp(cmd: List[str], *, timeout: float) -> subproc.SubprocResult:
     """Run a yt-dlp (or SSH-wrapped) command under the process-wide concurrency gate."""
     with _ytdlp_slots:
-        return subproc.run_with_timeout(cmd, timeout=timeout)
+        # yt-dlp is a third-party binary; the ssh-wrapped lane needs the agent
+        # socket, which is the only ambient credential it gets.
+        return subproc.run_with_timeout(
+            cmd, timeout=timeout, env=subproc.child_env(prefix_allow=("SSH_",))
+        )
 
 
 def _claim_search_slot(

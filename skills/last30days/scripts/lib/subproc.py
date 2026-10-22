@@ -140,6 +140,7 @@ def _taskkill_pid(pid: int, timeout: float = 2) -> bool:
             stderr=subprocess.DEVNULL,
             timeout=timeout,
             check=False,
+            env=child_env(),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired):

@@ -211,21 +211,21 @@ class _Proc:
 def test_run_cli_flattens_nested_envelope(monkeypatch):
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
     payload = '{"meta":{},"results":{"entries":[{"title":"X"}]}}'
-    monkeypatch.setattr(arxiv.subproc, "run_with_timeout", lambda cmd, timeout: _Proc(0, payload))
+    monkeypatch.setattr(arxiv.subproc, "run_with_timeout", lambda cmd, timeout, **kwargs: _Proc(0, payload))
     resp = arxiv.search_arxiv("topic", "2026-06-01", "2026-06-27")
     assert resp["results"] == [{"title": "X"}]
 
 
 def test_run_cli_nonzero_exit_returns_error(monkeypatch):
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
-    monkeypatch.setattr(arxiv.subproc, "run_with_timeout", lambda cmd, timeout: _Proc(1, "", "boom\nmore"))
+    monkeypatch.setattr(arxiv.subproc, "run_with_timeout", lambda cmd, timeout, **kwargs: _Proc(1, "", "boom\nmore"))
     resp = arxiv.search_arxiv("topic", "2026-06-01", "2026-06-27")
     assert resp["results"] == [] and "boom" in resp["error"]
 
 
 def test_run_cli_bad_json_returns_error(monkeypatch):
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
-    monkeypatch.setattr(arxiv.subproc, "run_with_timeout", lambda cmd, timeout: _Proc(0, "not json"))
+    monkeypatch.setattr(arxiv.subproc, "run_with_timeout", lambda cmd, timeout, **kwargs: _Proc(0, "not json"))
     resp = arxiv.search_arxiv("topic", "2026-06-01", "2026-06-27")
     assert resp["results"] == [] and "error" in resp
 
@@ -234,7 +234,7 @@ def test_empty_stdout_returns_error_without_retry(monkeypatch):
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
     calls = []
 
-    def fake_run(cmd, timeout):
+    def fake_run(cmd, timeout, **kwargs):
         calls.append(cmd)
         return _Proc(0, "")
 
@@ -248,7 +248,7 @@ def test_unrecognized_json_returns_error_without_retry(monkeypatch):
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
     calls = []
 
-    def fake_run(cmd, timeout):
+    def fake_run(cmd, timeout, **kwargs):
         calls.append(cmd)
         return _Proc(0, '{"status":"ok"}')
 
@@ -262,7 +262,7 @@ def test_recognized_empty_list_retries(monkeypatch):
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
     calls = []
 
-    def fake_run(cmd, timeout):
+    def fake_run(cmd, timeout, **kwargs):
         calls.append(cmd)
         return _Proc(0, "[]")
 
@@ -280,7 +280,7 @@ def test_zero_result_quoted_query_retries_unquoted_and_finds_results(monkeypatch
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
     calls = []
 
-    def fake_run(cmd, timeout):
+    def fake_run(cmd, timeout, **kwargs):
         calls.append(cmd)
         query = cmd[cmd.index("--search-query") + 1]
         if query == 'all:"AI video generation advances"':
@@ -299,7 +299,7 @@ def test_zero_result_quoted_query_retry_also_empty_returns_empty(monkeypatch):
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
     calls = []
 
-    def fake_run(cmd, timeout):
+    def fake_run(cmd, timeout, **kwargs):
         calls.append(cmd)
         return _Proc(0, '{"results":{"entries":[]}}')
 
@@ -316,7 +316,7 @@ def test_real_cli_error_does_not_trigger_unquoted_retry(monkeypatch):
     monkeypatch.setattr(arxiv, "_is_available", lambda: True)
     calls = []
 
-    def fake_run(cmd, timeout):
+    def fake_run(cmd, timeout, **kwargs):
         calls.append(cmd)
         return _Proc(1, "", "boom")
 

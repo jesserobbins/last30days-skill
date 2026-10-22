@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import health, http, log, usage
+from . import health, http, log, subproc, usage
 from . import x_api
 # One X API v2 depth table and one parser: xurl_x re-imports both.
 from .x_api import DEPTH_CONFIG
@@ -72,6 +72,7 @@ def _is_available_uncached() -> bool:
             capture_output=True,
             text=True,
             timeout=10,
+            env=subproc.child_env(),
         )
         return (
             result.returncode == 0
@@ -319,6 +320,8 @@ def search_x(
             capture_output=True,
             text=True,
             timeout=timeout,
+            # xurl keeps its own token store under HOME.
+            env=subproc.child_env(),
         )
 
         if result.returncode != 0:

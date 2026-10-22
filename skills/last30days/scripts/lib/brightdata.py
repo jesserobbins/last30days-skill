@@ -164,12 +164,16 @@ def _child_env(api_key: str) -> Dict[str, str]:
     settings, and this module's own key when one is configured -- never
     ``None``, which ``subprocess`` reads as "inherit everything".
     """
-    return subproc.child_env(
-        # An empty-but-present BRIGHTDATA_API_KEY= would make a CLI that tests
-        # for presence skip its own credentials-file fallback.
-        extra={API_KEY_ENV: api_key} if api_key else None,
-        prefix_allow=("BRIGHTDATA_",),
-    )
+    env = subproc.child_env(prefix_allow=("BRIGHTDATA_",))
+    # An empty-but-present BRIGHTDATA_API_KEY= would make a CLI that tests for
+    # presence skip its own credentials-file fallback. That includes a blank
+    # value inherited through the prefix above.
+    if api_key:
+        env.update({API_KEY_ENV: api_key})
+    else:
+        # pop() as well, because prefix_allow copied it in if it was set-but-blank
+        env.pop(API_KEY_ENV, None)
+    return env
 
 
 def _scrub(text: str, secret: str) -> str:

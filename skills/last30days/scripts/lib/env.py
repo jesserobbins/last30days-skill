@@ -943,6 +943,7 @@ def _mac_model() -> str:
         out = subprocess.run(
             ["sysctl", "-n", "hw.model"],
             capture_output=True, text=True, timeout=3,
+            env=subproc.child_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return ""
