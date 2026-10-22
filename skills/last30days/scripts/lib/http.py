@@ -10,6 +10,8 @@ import socket
 import threading
 import time
 import urllib.error
+import http.client
+import ipaddress
 import urllib.request
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -153,9 +155,96 @@ class _StripAuthOnCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
         return new
 
 
+def _is_globally_reachable(address: str) -> bool:
+    """True only for a globally reachable, non-multicast address."""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return bool(parsed.is_global) and not parsed.is_multicast
+
+
+class _PinnedConnectionMixin:
+    """Connect only to an address this process approved.
+
+    Validating the *name* before the fetch leaves a rebinding window: the
+    lookup that cleared the URL and the lookup http.client performs when it
+    connects are separate, so an attacker-controlled zone can answer publicly
+    for the first and with 127.0.0.1 for the second. Resolving here and
+    connecting only to an approved address closes that window. The original
+    hostname still drives the ``Host`` header and TLS SNI, so certificate
+    verification is unchanged.
+
+    ``_create_connection`` is the stdlib's own hook (socket.create_connection),
+    so the timeout and ``source_address`` behaviour match http.client.
+    """
+
+    def connect(self):
+        try:
+            infos = socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM)
+        except (OSError, UnicodeError) as error:
+            raise urllib.error.URLError(
+                f"could not resolve {self.host}: {error}"
+            ) from error
+        approved = [
+            info
+            for info in infos
+            if _is_globally_reachable(info[4][0].split("%")[0])
+        ]
+        if not approved:
+            raise urllib.error.URLError(
+                f"refusing to connect to a non-public address for {self.host}"
+            )
+        # First approved answer only: never fall back to a rejected one.
+        _family, _socktype, _proto, _canonname, sockaddr = approved[0]
+        self.sock = self._create_connection(
+            sockaddr, self.timeout, self.source_address
+        )
+        if self._tunnel_host:
+            self._tunnel()
+
+
+class _PinnedHTTPConnection(
+    _PinnedConnectionMixin, getattr(http.client, "HTTPConnection")
+):
+    pass
+
+
+class _PinnedHTTPSConnection(
+    _PinnedConnectionMixin, getattr(http.client, "HTTPSConnection")
+):
+    pass
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    """HTTPHandler that only uses the pinned connection on validator requests."""
+
+    def http_open(self, req):
+        if getattr(req, "last30days_url_validator", None) is None:
+            return super().http_open(req)
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        if getattr(req, "last30days_url_validator", None) is None:
+            return super().https_open(req)
+        return self.do_open(
+            _PinnedHTTPSConnection, req, context=self._context
+        )
+
+
 _opener = urllib.request.build_opener(_StripAuthOnCrossOriginRedirect)
 _direct_opener = urllib.request.build_opener(
     urllib.request.ProxyHandler({}), _StripAuthOnCrossOriginRedirect
+)
+# Same redirect guard, but every hop connects to an approved address. Only
+# used for requests whose caller supplied a url validator (the careers probe).
+_pinned_opener = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _PinnedHTTPHandler,
+    _PinnedHTTPSHandler,
+    _StripAuthOnCrossOriginRedirect,
 )
 _DEFAULT_URLOPEN = urllib.request.urlopen
 
@@ -165,8 +254,23 @@ def _open_request(req, timeout, *, bypass_proxy=False):
     current = urllib.request.urlopen
     if current is not _DEFAULT_URLOPEN:
         return current(req, timeout=timeout)
+    if getattr(req, "last30days_url_validator", None) is not None:
+        # Pin the connection to an approved address. A proxy would make the
+        # pin meaningless (the socket goes to the proxy), so a proxied
+        # environment keeps the validated-name behaviour instead.
+        if bypass_proxy or not _proxy_configured():
+            return _pinned_opener.open(req, timeout=timeout)
     opener = _direct_opener if bypass_proxy else _opener
     return opener.open(req, timeout=timeout)
+
+
+def _proxy_configured() -> bool:
+    """True when the environment routes HTTP(S) through a proxy."""
+    return any(
+        os.environ.get(name)
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                     "ALL_PROXY", "all_proxy")
+    )
 
 
 def open_request(req, timeout):

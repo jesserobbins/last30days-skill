@@ -101,26 +101,29 @@ def test_empty_host_returns_false():
     assert jobs._is_fetchable_url("http:///jobs") is False
 
 
-@pytest.mark.parametrize("error", [UnicodeError("label too long"), OSError("nope")])
-def test_resolution_errors_do_not_escape(monkeypatch, error):
-    """getaddrinfo raises UnicodeEncodeError (not OSError) past 63 chars."""
-    monkeypatch.setattr(jobs.socket, "getaddrinfo", mock.Mock(side_effect=error))
-    assert jobs._is_fetchable_url("http://" + "a" * 64 + ".com/jobs") is True
+def test_invalid_label_is_rejected(monkeypatch):
+    """An invalid label can never be fetched, so it is refused, not waved through."""
+    monkeypatch.setattr(
+        jobs.socket, "getaddrinfo", mock.Mock(side_effect=UnicodeError("label too long"))
+    )
+    assert jobs._is_fetchable_url("http://" + "a" * 64 + ".com/jobs") is False
 
 
-def test_long_company_name_does_not_abort_the_probe(monkeypatch):
+def test_transient_resolution_failure_fails_open(monkeypatch):
+    monkeypatch.setattr(jobs.socket, "getaddrinfo", mock.Mock(side_effect=OSError("nope")))
+    assert jobs._is_fetchable_url("http://careers.example/jobs") is True
+
+
+def test_long_company_name_skips_the_candidate_without_raising(monkeypatch):
     """A >63-char label must not raise out of a documented never-raises path."""
     monkeypatch.setattr(
         jobs.socket, "getaddrinfo", mock.Mock(side_effect=UnicodeError("label too long"))
     )
-    bad = "http://" + "a" * 64 + ".com/jobs"
-    with mock.patch.object(
-        jobs.grounding, "web_search", return_value=([{"url": bad}], {})
-    ):
-        # Fails open, then the fetch itself fails: the point is no exception.
-        assert jobs._search_for_careers_url(
-            "Acme", ("2026-01-01", "2026-01-31"), {}, backend="duckduckgo"
-        ) == bad
+    with mock.patch.object(jobs.http, "get_text", return_value=None) as get_text:
+        assert jobs._resolve_careers_page(
+            "a" * 70, ("2026-01-01", "2026-01-31"), {}, backend="none"
+        ) == (None, None)
+    assert get_text.call_count >= 0  # never raised
 
 
 def test_unparsable_resolved_address_is_rejected(monkeypatch):

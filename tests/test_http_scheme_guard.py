@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import threading
 import unittest
+import urllib.error
+import urllib.request
+from unittest import mock
 
 import pytest
 
@@ -128,20 +131,86 @@ class RedirectSchemeGuardTest(unittest.TestCase):
     def test_caller_validator_is_applied_to_the_redirect_target(self):
         # A public careers page redirecting to link-local metadata passes a
         # first-hop-only check, so the validator has to ride the redirect.
-        url = self._serve(location="http://169.254.169.254/latest/meta-data/careers")
-        with pytest.raises(http.HTTPError) as error:
-            http.request(
-                "GET",
-                url,
-                raw=True,
-                retries=1,
-                timeout=5,
-                validate_url=lambda candidate: "169.254." not in candidate,
+        # Tested on the handler directly: a request carrying a validator is
+        # also pinned to a public address, so a loopback test server would be
+        # refused before the redirect is ever seen.
+        handler = http._StripAuthOnCrossOriginRedirect()
+        request = urllib.request.Request("http://careers.example/jobs")
+        request.last30days_url_validator = (
+            lambda candidate: "169.254." not in candidate
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "http://169.254.169.254/latest/meta-data/careers",
             )
         assert "refused URL" in str(error.value)
+
+    def test_validator_rides_the_redirect_to_the_next_hop(self):
+        handler = http._StripAuthOnCrossOriginRedirect()
+        request = urllib.request.Request("http://careers.example/jobs")
+        validator = lambda candidate: True  # noqa: E731
+        request.last30days_url_validator = validator
+        new = handler.redirect_request(
+            request, None, 302, "Found", {}, "http://careers.example/roles"
+        )
+        assert new.last30days_url_validator is validator
 
     def test_http_redirect_is_followed_to_the_body(self):
         terminal = self._serve(body="<html>public careers page</html>")
         url = self._serve(location=terminal)
         body = http.request("GET", url, raw=True, retries=1, timeout=5)
         assert "public careers page" in body
+
+
+class PinnedAddressTest(unittest.TestCase):
+    """Validating the name must not leave the connection address unchecked.
+
+    The lookup that clears a URL and the lookup http.client performs when it
+    connects are separate, so an attacker-controlled zone can answer publicly
+    first and with a loopback address for the real connection.
+    """
+
+    def test_connection_refuses_a_non_public_answer(self):
+        """Second lookup returning 127.0.0.1 must not be dialled."""
+        import socket
+
+        connection = http._PinnedHTTPSConnection("careers.attacker.example", timeout=5)
+        dialled: list = []
+
+        def rebound(host, *args, **kwargs):
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+            ]
+
+        connection._create_connection = lambda *a, **k: dialled.append(a) or mock.MagicMock()
+        with mock.patch.object(http.socket, "getaddrinfo", side_effect=rebound):
+            with pytest.raises(urllib.error.URLError):
+                connection.connect()
+        assert dialled == [], "a loopback address was dialled"
+
+    def test_connection_dials_the_public_answer(self):
+        import socket
+
+        connection = http._PinnedHTTPSConnection("careers.example", timeout=5)
+        dialled: list = []
+        connection._create_connection = lambda *a, **k: dialled.append(a) or mock.MagicMock()
+
+        with mock.patch.object(
+            http.socket, "getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            ],
+        ):
+            connection.connect()
+
+        assert dialled == [(("93.184.216.34", 443), 5, None)], dialled
+
+    def test_hostname_is_preserved_for_the_host_header(self):
+        connection = http._PinnedHTTPSConnection("careers.example", timeout=5)
+        assert connection.host == "careers.example"

@@ -201,10 +201,15 @@ def _resolves_to_public(host: str) -> bool:
     """
     try:
         infos = socket.getaddrinfo(host, None)
-    except (OSError, UnicodeError):
-        # UnicodeError is not an OSError: getaddrinfo raises
-        # UnicodeEncodeError for a label longer than 63 characters, which a
-        # long company name or a poisoned hit can produce.
+    except UnicodeError:
+        # getaddrinfo raises UnicodeEncodeError (not OSError) for an invalid
+        # label -- >63 characters, for instance. That host can never be
+        # fetched safely, and letting it through means urllib raises the same
+        # error later, outside the handled exceptions, aborting the jobs lane.
+        return False
+    except OSError:
+        # Transient resolution failure: the fetch fails on its own, so the
+        # predicate stays total and offline runs stay DNS-independent.
         return True
     for info in infos:
         try:
