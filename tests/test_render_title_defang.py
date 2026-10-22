@@ -256,3 +256,42 @@ class TitleDefangTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ControlCharacterTest(unittest.TestCase):
+    """Scraped text must not carry terminal or display control into output.
+
+    Titles and snippets land in a terminal (direct CLI) and in the host model's
+    context (relayed briefs). ANSI escape sequences can retitle or clear the
+    user's terminal, and bidi overrides reorder the rendered line so a cited
+    domain reads as a different one than the URL actually says.
+    """
+
+    def test_ansi_escape_sequences_are_stripped(self):
+        out = render._safe_title("title\x1b[2J\x1b]0;pwned\x07rest")
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+        self.assertIn("title", out)
+        self.assertIn("rest", out)
+
+    def test_c1_controls_are_stripped(self):
+        out = render._safe_title("a\x9bb")
+        self.assertNotIn("\x9b", out)
+        self.assertIn("a", out)
+
+    def test_bidi_overrides_are_stripped(self):
+        out = render._safe_title("see \u202egnp.exe\u202c for details")
+        self.assertNotIn("\u202e", out)
+        self.assertNotIn("\u202c", out)
+
+    def test_zero_width_and_bom_are_stripped(self):
+        out = render._safe_title("a\u200bb\u200fc\ufeffd")
+        for char in ("\u200b", "\u200f", "\ufeff"):
+            self.assertNotIn(char, out)
+
+    def test_newlines_and_tabs_survive_in_multiline_evidence(self):
+        # Snippet rendering depends on line structure staying intact.
+        out = render._format_untrusted_evidence("first\n\tsecond", 100)
+        self.assertIn("first", out)
+        self.assertIn("second", out)
+        self.assertEqual(len(out.splitlines()), 2)
