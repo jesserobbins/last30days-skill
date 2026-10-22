@@ -1327,7 +1327,13 @@ def _start_device_flow() -> "Tuple[Dict[str, Any], Optional[Dict[str, Any]]]":
     clipboard_ok = False
     if sys.platform == "darwin":
         try:
-            subprocess.run(["pbcopy"], input=user_code.encode(), check=True, timeout=5)
+            subprocess.run(
+                ["pbcopy"],
+                input=user_code.encode(),
+                check=True,
+                timeout=5,
+                env=subproc.child_env(),
+            )
             clipboard_ok = True
         except Exception:
             pass  # pbcopy unavailable or failed, fall through

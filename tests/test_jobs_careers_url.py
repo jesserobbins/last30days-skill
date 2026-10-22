@@ -49,8 +49,53 @@ def test_search_result_cannot_point_at_the_local_network(url):
         ) is None
 
 
-def test_malformed_search_hit_does_not_abort_the_probe():
+def _allow_dns(monkeypatch, address: str = "8.8.8.8"):
+    """Stub resolution so the suite's network guard stays closed.
+
+    The default is a globally reachable address: documentation ranges such as
+    203.0.113.0/24 are reserved, so is_global is False for them and they would
+    be rejected on the positive paths.
+    """
+    import ipaddress
+    import socket as socket_mod
+
+    def fake_getaddrinfo(host, *args, **kwargs):
+        return [(socket_mod.AF_INET, socket_mod.SOCK_STREAM, 6, "", (address, 0))]
+
+    monkeypatch.setattr(jobs.socket, "getaddrinfo", fake_getaddrinfo)
+    return ipaddress.ip_address(address)
+
+
+def test_hostname_resolving_to_loopback_is_rejected(monkeypatch):
+    """A DNS record pointing at 127.0.0.1 needs no rebinding to be useful."""
+    _allow_dns(monkeypatch, "127.0.0.1")
+    with mock.patch.object(
+        jobs.grounding, "web_search", return_value=(_search_result("http://careers.attacker.example/jobs"), {})
+    ):
+        assert jobs._search_for_careers_url(
+            "Acme", ("2026-01-01", "2026-01-31"), {}, backend="duckduckgo"
+        ) is None
+
+
+def test_hostname_resolving_to_metadata_is_rejected(monkeypatch):
+    _allow_dns(monkeypatch, "169.254.169.254")
+    assert jobs._is_fetchable_url("http://careers.attacker.example/jobs") is False
+
+
+def test_unresolvable_hostname_does_not_block_the_fetch(monkeypatch):
+    """Resolution failure must not change the predicate: the fetch fails anyway."""
+    import socket as socket_mod
+
+    def broken(host, *args, **kwargs):
+        raise socket_mod.gaierror("no dns here")
+
+    monkeypatch.setattr(jobs.socket, "getaddrinfo", broken)
+    assert jobs._is_fetchable_url("http://careers.example/jobs") is True
+
+
+def test_malformed_search_hit_does_not_abort_the_probe(monkeypatch):
     """One unparsable hit must be skipped, not raise out of discovery."""
+    _allow_dns(monkeypatch)
     results = [
         {"title": "broken", "url": "http://[broken/about", "snippet": "careers"},
         {"title": "Acme careers", "url": "https://boards.greenhouse.io/acme"},
@@ -61,12 +106,24 @@ def test_malformed_search_hit_does_not_abort_the_probe():
         ) == "https://boards.greenhouse.io/acme"
 
 
-def test_public_careers_url_is_still_accepted():
+def test_public_careers_url_is_still_accepted(monkeypatch):
+    _allow_dns(monkeypatch)
     url = "https://boards.greenhouse.io/acme"
     with mock.patch.object(jobs.grounding, "web_search", return_value=(_search_result(url), {})):
         assert jobs._search_for_careers_url(
             "Acme", ("2026-01-01", "2026-01-31"), {}, backend="duckduckgo"
         ) == url
+
+
+def test_public_fetch_survives_a_locally_resolving_guessed_domain(monkeypatch):
+    """The guessed {slug}.com candidates get the same per-hop rule."""
+    _allow_dns(monkeypatch, "127.0.0.1")
+    with mock.patch.object(jobs.http, "get_text", return_value=None) as get_text:
+        jobs._resolve_careers_page(
+            "Acme", ("2026-01-01", "2026-01-31"), {}, backend="none"
+        )
+    for call in get_text.call_args_list:
+        assert call.kwargs.get("validate_url") is jobs._is_fetchable_url
 
 
 def test_careers_fetch_skips_a_rejected_url():

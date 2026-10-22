@@ -13,6 +13,7 @@ else before a request is built.
 
 from __future__ import annotations
 
+import threading
 import unittest
 
 import pytest
@@ -67,57 +68,80 @@ class RedirectSchemeGuardTest(unittest.TestCase):
     opener then services it with FTPHandler, so a public page answering
     ``302 Location: ftp://internal/`` used to move the engine onto another
     transport with the guard already behind it.
+
+    These tests use retries=1, not 0: ``request`` skips its transport loop
+    entirely when the retry budget is zero and raises a generic "Request
+    failed with no error details", which would let every assertion below pass
+    with the guard deleted.
     """
 
-    def serve_redirect(self, location: str) -> str:
-        """Start a one-shot server that 302s to ``location``; return its URL."""
+    _servers: list = []
+
+    def tearDown(self):
+        for server in self._servers:
+            server.server_close()
+        self._servers.clear()
+
+    def _serve(self, body: str | None = None, location: str | None = None) -> str:
+        """Serve ``body`` with 200, or redirect to ``location``; return the URL."""
         import http.server
         import socketserver
-        import threading
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - stdlib name
-                self.send_response(302)
-                self.send_header("Location", location)
+                if location is not None:
+                    self.send_response(302)
+                    self.send_header("Location", location)
+                    self.end_headers()
+                    return
+                payload = (body or "").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
+                self.wfile.write(payload)
 
             def log_message(self, *args):
                 pass
 
         socketserver.TCPServer.allow_reuse_address = True
         server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
-        port = server.server_address[1]
-        thread = threading.Thread(target=server.handle_request, daemon=True)
-        thread.start()
-        return f"http://127.0.0.1:{port}/careers"
+        self._servers.append(server)
+        handler = lambda: server.handle_request()  # noqa: E731
+        threading.Thread(target=handler, daemon=True).start()
+        return f"http://127.0.0.1:{server.server_address[1]}/careers"
 
     def test_ftp_redirect_is_refused(self):
-        url = self.serve_redirect("ftp://127.0.0.1:2121/careers")
-        with pytest.raises(http.HTTPError):
-            http.request("GET", url, raw=True, retries=0)
+        url = self._serve(location="ftp://127.0.0.1:2121/careers")
+        with pytest.raises(http.HTTPError) as error:
+            http.request("GET", url, raw=True, retries=1, timeout=5)
+        assert "non-HTTP(S)" in str(error.value)
 
     def test_file_redirect_is_refused(self):
-        url = self.serve_redirect("file:///etc/passwd")
-        with pytest.raises(http.HTTPError):
-            http.request("GET", url, raw=True, retries=0)
+        # CPython refuses file:// redirects itself (its own allowlist is
+        # http/https/ftp); this pins that the local file is never read.
+        url = self._serve(location="file:///tmp/last30days-should-not-be-read")
+        with pytest.raises(http.HTTPError) as error:
+            http.request("GET", url, raw=True, retries=1, timeout=5)
+        assert "not allowed" in str(error.value) or "non-HTTP(S)" in str(error.value)
 
     def test_caller_validator_is_applied_to_the_redirect_target(self):
-        # A public careers page that redirects to link-local metadata passes a
-        # first-hop-only check.
-        url = self.serve_redirect("http://169.254.169.254/latest/meta-data/careers")
-        reject_private = lambda candidate: "169.254." not in candidate  # noqa: E731
-        with pytest.raises(http.HTTPError):
+        # A public careers page redirecting to link-local metadata passes a
+        # first-hop-only check, so the validator has to ride the redirect.
+        url = self._serve(location="http://169.254.169.254/latest/meta-data/careers")
+        with pytest.raises(http.HTTPError) as error:
             http.request(
-                "GET", url, raw=True, retries=0, validate_url=reject_private
+                "GET",
+                url,
+                raw=True,
+                retries=1,
+                timeout=5,
+                validate_url=lambda candidate: "169.254." not in candidate,
             )
+        assert "refused URL" in str(error.value)
 
-    def test_http_redirect_still_follows(self):
-        target = self.serve_redirect("/ok")
-        url = self.serve_redirect(target)
-        # No assertion on the body: the point is that an http(s) hop is not
-        # refused by the new guard. A connection error here means the one-shot
-        # server ran out, which is not what this test is about.
-        try:
-            http.request("GET", url, raw=True, retries=0)
-        except http.HTTPError as error:
-            assert "non-HTTP" not in str(error)
+    def test_http_redirect_is_followed_to_the_body(self):
+        terminal = self._serve(body="<html>public careers page</html>")
+        url = self._serve(location=terminal)
+        body = http.request("GET", url, raw=True, retries=1, timeout=5)
+        assert "public careers page" in body

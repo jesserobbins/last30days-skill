@@ -163,9 +163,42 @@ def _is_fetchable_url(url: str) -> bool:
         try:
             socket.inet_aton(host)
         except OSError:
-            return True
+            return _resolves_to_public(host)
         return False
+    return _is_public_address(address)
+
+
+def _is_public_address(address: ipaddress._BaseAddress) -> bool:
+    """True only for globally reachable, non-multicast addresses.
+
+    Expressed positively on purpose: ``is_private`` is False for
+    100.64.0.0/10, so a negated list of flags admits the carrier-grade NAT
+    range that holds Alibaba Cloud's metadata endpoint.
+    """
     return bool(address.is_global) and not address.is_multicast
+
+
+def _resolves_to_public(host: str) -> bool:
+    """False when a hostname resolves to a non-global address.
+
+    A name-only check misses the cheap attack: an attacker-registered domain
+    whose A record points at 127.0.0.1 or a metadata endpoint needs no DNS
+    rebinding at all. Resolution failure counts as reachable -- an
+    unresolvable host cannot be fetched, and keeping the predicate total keeps
+    offline and CI runs independent of DNS.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return True
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except (ValueError, IndexError, TypeError):
+            continue
+        if not _is_public_address(address):
+            return False
+    return True
 
 
 def _resolve_careers_page(
@@ -189,7 +222,11 @@ def _resolve_careers_page(
 
     for url in candidates:
         with http.expected_misses(403, 404):
-            html = http.get_text(url, accept="text/html", retries=1)
+            # Anyone can own {slug}.com/.ai/.io, so the redirect rule has to
+            # hold here too, not only on the search-derived branch.
+            html = http.get_text(
+                url, accept="text/html", retries=1, validate_url=_is_fetchable_url
+            )
         if html and _looks_like_careers_html(html):
             return html, url
 

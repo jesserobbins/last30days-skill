@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from . import subproc
+
 
 def read_secret_env(name: str, default: str | None = None) -> str | None:
     """Read a possibly-secret environment variable by name.
@@ -421,6 +423,7 @@ def _load_keychain(keys: list[str], aliases: dict[str, list[dict[str, str]]] | N
                  "-s", service,
                  "-w"],
                 capture_output=True, text=True, timeout=5,
+                env=subproc.child_env(),
             )
         except (subprocess.TimeoutExpired, OSError):
             return ""
@@ -467,6 +470,12 @@ def _load_pass(keys: list[str], prefix: str) -> dict[str, str]:
                 [pass_bin, "show", f"{prefix}{key}"],
                 capture_output=True, text=True, timeout=5,
                 encoding="utf-8", errors="replace",
+                # pass decrypts through gpg, which needs its own home and
+                # agent settings -- but not the engine's API keys.
+                env=subproc.child_env(
+                    extra={"GNUPGHOME": os.environ.get("GNUPGHOME")},
+                    prefix_allow=("GPG_", "PASSWORD_STORE_"),
+                ),
             )
         except (subprocess.TimeoutExpired, OSError):
             # A timeout (GPG/pinentry hanging) or exec failure isn't a per-key

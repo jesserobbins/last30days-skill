@@ -12,6 +12,7 @@ exactly this reason; these tests hold the rest of the tree to that standard.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -191,3 +192,88 @@ def test_cookie_decrypt_does_not_inherit_secrets():
     assert env is not None, "openssl child must get an explicit env"
     for name in SECRETS:
         assert name not in env
+
+
+@pytest.mark.parametrize(
+    "module_name, call",
+    [
+        ("env", lambda m: m._load_keychain(["OPENAI_API_KEY"])),
+        ("env", lambda m: m._load_pass(["OPENAI_API_KEY"], "last30days/")),
+        ("github", lambda m: m._resolve_token()),
+        ("corpus", lambda m: m._extract_text(Path("/tmp/x.pdf"), pdftotext="pdftotext")),
+    ],
+)
+def test_other_children_are_also_scoped(module_name, call):
+    """Every child spawn in the tree, not just the five in the first pass.
+
+    These modules import ``shutil``/``subprocess`` inside the function body, so
+    the patch targets the stdlib module rather than a module attribute.
+    """
+    import importlib
+
+    module = importlib.import_module(f"lib.{module_name}")
+    captured: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(kwargs.get("env"))
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    with mock.patch.dict("os.environ", SECRETS, clear=False), mock.patch(
+        "shutil.which", side_effect=lambda name: f"/usr/bin/{name}"
+    ), mock.patch("subprocess.run", side_effect=fake_run):
+        try:
+            call(module)
+        except Exception:
+            pass  # the point is the env handed to the child, not the parsing
+
+    assert captured, f"{module_name} spawned no child"
+    for child_env in captured:
+        assert child_env is not None, f"{module_name} child inherited the environment"
+        for name in SECRETS:
+            assert name not in child_env, f"{name} leaked to a {module_name} child"
+
+
+def test_health_probe_is_scoped():
+    """health probes run through subproc.run_with_timeout, not subprocess.run."""
+    from lib import health
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return mock.Mock(returncode=0, stdout="2026.01.01", stderr="", timed_out=False)
+
+    with mock.patch.dict("os.environ", SECRETS, clear=False), mock.patch(
+        "shutil.which", side_effect=lambda name: f"/usr/bin/{name}"
+    ), mock.patch.object(health.subproc, "run_with_timeout", side_effect=fake_run):
+        health._probe_dependency_uncached("yt-dlp", 5.0)
+
+    env = captured["env"]
+    assert env is not None, "health probe child inherited the environment"
+    for name in SECRETS:
+        assert name not in env
+
+
+def test_gnupg_home_reaches_the_pass_child():
+    """pass decrypts through gpg; the allowlist must not strand it."""
+    from lib import env as env_mod
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    with mock.patch.dict(
+        "os.environ",
+        {**SECRETS, "GNUPGHOME": "/tmp/gnupg-home", "GPG_TTY": "/dev/ttys001"},
+        clear=False,
+    ), mock.patch("shutil.which", return_value="/usr/bin/pass"), mock.patch(
+        "subprocess.run", side_effect=fake_run
+    ):
+        env_mod._load_pass(["OPENAI_API_KEY"], "last30days/")
+
+    env = captured["env"]
+    assert env["GNUPGHOME"] == "/tmp/gnupg-home"
+    assert env["GPG_TTY"] == "/dev/ttys001"
+    assert "OPENAI_API_KEY" not in env

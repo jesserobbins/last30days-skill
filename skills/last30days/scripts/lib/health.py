@@ -104,6 +104,7 @@ def probe_command(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=subproc.child_env(),
         )
     except (FileNotFoundError, OSError) as exc:
         return SourceHealth(name=name, state=BROKEN, reason=f"{name} present but won't execute: {exc}")
@@ -423,6 +424,7 @@ def _probe_dependency_uncached(name: str, timeout: float) -> DependencyProbe:
             deadline_monotonic=deadline - 2 * cleanup_grace,
             cleanup_grace=cleanup_grace,
             capture_limit_bytes=64 * 1024,
+            env=subproc.child_env(),
         )
     except (FileNotFoundError, OSError) as exc:
         prescription, manager = _prescription(name, "reinstall")
