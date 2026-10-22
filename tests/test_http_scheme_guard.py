@@ -361,9 +361,13 @@ class PinningIntegrationTest(unittest.TestCase):
         supplies a validator gets connect-time address filtering, so a
         loopback answer cannot be dialled at all.
         """
+        # bypass_proxy keeps the control fetch off _opener, whose ProxyHandler
+        # captured the proxy environment at import time.
+        plain = self._serve()
+        assert "careers" in http.request(
+            "GET", plain, raw=True, retries=1, timeout=5, bypass_proxy=True
+        )
         with mock.patch.object(http.urllib.request, "getproxies", return_value={}):
-            plain = self._serve()
-            assert "careers" in http.request("GET", plain, raw=True, retries=1, timeout=5)
 
             pinned = self._serve()
             with pytest.raises(http.HTTPError):

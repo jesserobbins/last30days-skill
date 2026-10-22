@@ -23,6 +23,7 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes only")
 def test_nominations_bundle_is_written_owner_only(tmp_path):
     state_dir = tmp_path / "state"
     discovery_handoff.write_nominations_bundle(
@@ -40,6 +41,7 @@ def test_nominations_bundle_is_written_owner_only(tmp_path):
     assert _mode(bundle) == 0o600
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes only")
 def test_persist_report_hardens_the_database_without_a_corpus(tmp_path, monkeypatch):
     """No corpus in this report, but the DB still holds every finding body."""
     from tests.test_judge_reason_defang import report_with, candidate
