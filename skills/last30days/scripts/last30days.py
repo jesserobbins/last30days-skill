@@ -2234,7 +2234,10 @@ def _run_discover_resume(args: argparse.Namespace, config: dict[str, object]) ->
     # threads and never touch disk.
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
-        pending_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # Carries schema.to_dict(report): full evidence bodies, so owner-only.
+        write_private_text(
+            pending_path, json.dumps(payload, indent=2), encoding="utf-8"
+        )
     except OSError as exc:
         # A locked/read-only/full disk is the protocol's clean exit-2 path,
         # never a traceback (same contract as the bundle write).
