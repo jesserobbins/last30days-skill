@@ -302,7 +302,7 @@ def test_xurl_children_are_scoped():
     ):
         xurl_x._is_available_uncached()
         try:
-            xurl_x.search("query", depth="quick", config={})
+            xurl_x.search_x("query", depth="quick")
         except Exception:
             pass
 

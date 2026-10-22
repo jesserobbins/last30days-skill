@@ -138,8 +138,15 @@ def _is_fetchable_url(url: str) -> bool:
     The predicate is "globally reachable", not "not private": ``is_private``
     is False for 100.64.0.0/10, so a negated list of flags admits the carrier-
     grade NAT range that holds Alibaba Cloud's metadata endpoint
-    (100.100.100.200). Hostnames are judged by name only, since a
-    resolution-time (DNS-rebinding) check is not something this seam can see.
+    (100.100.100.200).
+
+    Hostnames are resolved and rejected when any answer is non-global, which
+    closes the cheap case of an attacker-owned name whose A record points at
+    127.0.0.1. Resolution failure fails open -- an unresolvable host cannot be
+    fetched, and keeping the predicate total keeps offline runs independent of
+    DNS. This is a pre-flight check, not a pin: it does not constrain the
+    address urllib connects to, so a rebinding window between this lookup and
+    the fetch remains.
     """
     try:
         parsed = urlparse(url)
@@ -167,7 +174,7 @@ def _is_fetchable_url(url: str) -> bool:
         # resolver still accepts -- they can name any address, including ours.
         try:
             socket.inet_aton(host)
-        except OSError:
+        except (OSError, ValueError):
             return _resolves_to_public(host)
         return False
     return _is_public_address(address)
@@ -194,7 +201,10 @@ def _resolves_to_public(host: str) -> bool:
     """
     try:
         infos = socket.getaddrinfo(host, None)
-    except OSError:
+    except (OSError, UnicodeError):
+        # UnicodeError is not an OSError: getaddrinfo raises
+        # UnicodeEncodeError for a label longer than 63 characters, which a
+        # long company name or a poisoned hit can produce.
         return True
     for info in infos:
         try:
