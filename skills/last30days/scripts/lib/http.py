@@ -200,8 +200,13 @@ def _pinned_create_connection(address, timeout=None, source_address=None):
         )
     failures: list[OSError] = []
     for family, socktype, proto, _canonname, sockaddr in approved:
-        sock = socket.socket(family, socktype, proto)
+        sock = None
         try:
+            # Creation belongs inside the loop: on a host without IPv6
+            # support, socket.socket raises EAFNOSUPPORT for an approved AAAA
+            # answer, and plain create_connection would fall through to the
+            # next address rather than lose the request.
+            sock = socket.socket(family, socktype, proto)
             if timeout is not None:
                 sock.settimeout(timeout)
             if source_address:
@@ -210,7 +215,8 @@ def _pinned_create_connection(address, timeout=None, source_address=None):
             return sock
         except OSError as error:
             failures.append(error)
-            sock.close()
+            if sock is not None:
+                sock.close()
     raise failures[-1]
 
 
@@ -235,18 +241,35 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._create_connection = _pinned_create_connection
 
 
+def _should_pin(req) -> bool:
+    """True when this request must connect only to an approved address.
+
+    Decided per request -- which means per redirect hop -- because proxy
+    routing is per URL: a proxied request redirecting to a NO_PROXY host goes
+    direct, and an unproxied one redirecting into a proxied host does not.
+    Pinning a proxied hop would be meaningless (the socket goes to the proxy,
+    which resolves the name itself), and leaving a direct hop unpinned is the
+    rebinding window, so the decision has to travel with the URL.
+    """
+    if getattr(req, "last30days_url_validator", None) is None:
+        return False
+    if getattr(req, "last30days_force_direct", False):
+        return True
+    return not _proxy_applies(req.full_url)
+
+
 class _PinnedHTTPHandler(urllib.request.HTTPHandler):
-    """HTTPHandler that pins only the requests that carry a validator."""
+    """HTTPHandler that pins the hops that will actually go direct."""
 
     def http_open(self, req):
-        if getattr(req, "last30days_url_validator", None) is None:
+        if not _should_pin(req):
             return super().http_open(req)
         return self.do_open(_PinnedHTTPConnection, req)
 
 
 class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        if getattr(req, "last30days_url_validator", None) is None:
+        if not _should_pin(req):
             return super().https_open(req)
         return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
 
@@ -272,13 +295,15 @@ def _proxy_applies(url: str) -> bool:
         return True
 
 
-_opener = urllib.request.build_opener(_StripAuthOnCrossOriginRedirect)
-_direct_opener = urllib.request.build_opener(
-    urllib.request.ProxyHandler({}), _StripAuthOnCrossOriginRedirect
+# Both openers carry the pinning handlers; whether a given request pins is
+# decided per hop in _should_pin, so a redirect that changes routing class
+# (proxied <-> direct) is handled the same way as a fresh request.
+_opener = urllib.request.build_opener(
+    _PinnedHTTPHandler,
+    _PinnedHTTPSHandler,
+    _StripAuthOnCrossOriginRedirect,
 )
-# Same redirect guard, but every hop connects to an approved address. Only
-# used for requests whose caller supplied a url validator (the careers probe).
-_pinned_opener = urllib.request.build_opener(
+_direct_opener = urllib.request.build_opener(
     urllib.request.ProxyHandler({}),
     _PinnedHTTPHandler,
     _PinnedHTTPSHandler,
@@ -292,13 +317,8 @@ def _open_request(req, timeout, *, bypass_proxy=False):
     current = urllib.request.urlopen
     if current is not _DEFAULT_URLOPEN:
         return current(req, timeout=timeout)
-    if getattr(req, "last30days_url_validator", None) is not None and (
-        bypass_proxy or not _proxy_applies(req.full_url)
-    ):
-        # Pin the connection to an approved address. A proxy would make the
-        # pin meaningless (the socket goes to the proxy, which resolves the
-        # name itself), so only direct requests are pinned.
-        return _pinned_opener.open(req, timeout=timeout)
+    if bypass_proxy:
+        req.last30days_force_direct = True
     opener = _direct_opener if bypass_proxy else _opener
     return opener.open(req, timeout=timeout)
 

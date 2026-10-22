@@ -322,3 +322,89 @@ class ProxyAwarenessTest(unittest.TestCase):
             http.urllib.request, "getproxies", return_value={"https": "http://sys:3128"}
         ), mock.patch.object(http.urllib.request, "proxy_bypass", return_value=False):
             assert http._proxy_applies("https://careers.example/jobs") is True
+
+
+class PinningIntegrationTest(unittest.TestCase):
+    """The pin has to be reachable through the public request() path.
+
+    Component tests on the connection classes stay green if the handler
+    wiring is deleted, which is exactly the rebinding fix the changelog
+    claims.
+    """
+
+    def _serve(self) -> str:
+        import http.server
+        import socketserver
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib name
+                payload = b"<html>careers</html>"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        socketserver.TCPServer.allow_reuse_address = True
+        server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        port = server.server_address[1]
+        threading.Thread(target=server.handle_request, daemon=True).start()
+        return f"http://127.0.0.1:{port}/careers"
+
+    def test_a_validator_request_is_pinned_and_refuses_loopback(self):
+        """Unpinned loopback works; the same URL with a validator is refused.
+
+        This is the end-to-end shape of the rebinding fix: a caller that
+        supplies a validator gets connect-time address filtering, so a
+        loopback answer cannot be dialled at all.
+        """
+        with mock.patch.object(http.urllib.request, "getproxies", return_value={}):
+            plain = self._serve()
+            assert "careers" in http.request("GET", plain, raw=True, retries=1, timeout=5)
+
+            pinned = self._serve()
+            with pytest.raises(http.HTTPError):
+                http.request(
+                    "GET", pinned, raw=True, retries=1, timeout=5,
+                    validate_url=lambda candidate: True,
+                )
+
+    def test_forced_direct_requests_still_pin(self):
+        with mock.patch.object(http.urllib.request, "getproxies", return_value={}):
+            url = self._serve()
+            with pytest.raises(http.HTTPError):
+                http.request(
+                    "GET", url, raw=True, retries=1, timeout=5,
+                    validate_url=lambda candidate: True,
+                    bypass_proxy=True,
+                )
+
+    def test_socket_creation_failure_falls_through_to_the_next_answer(self):
+        """EAFNOSUPPORT on an approved AAAA answer must not lose the request."""
+        import errno
+        import socket
+
+        connection = http._PinnedHTTPConnection("careers.example", timeout=5)
+        created: list = []
+
+        def fake_socket(family, socktype, proto):
+            created.append(family)
+            if family == socket.AF_INET6:
+                raise OSError(errno.EAFNOSUPPORT, "address family not supported")
+            sock = mock.MagicMock()
+            return sock
+
+        with mock.patch.object(
+            http.socket,
+            "getaddrinfo",
+            return_value=[
+                (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800::1", 443, 0, 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            ],
+        ), mock.patch.object(http.socket, "socket", side_effect=fake_socket):
+            connection.connect()
+
+        assert created == [socket.AF_INET6, socket.AF_INET]

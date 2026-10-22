@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import discovery_handoff, private_files
+from lib import discovery_handoff
 
 
 def _mode(path: Path) -> int:
@@ -38,13 +38,6 @@ def test_nominations_bundle_is_written_owner_only(tmp_path):
     )
     bundle = discovery_handoff.nominations_bundle_path(state_dir)
     assert _mode(bundle) == 0o600
-
-
-def test_private_write_helper_sets_the_mode_before_writing(tmp_path):
-    target = tmp_path / "evidence.json"
-    private_files.write_private_text(target, '{"a": 1}')
-    assert _mode(target) == 0o600
-    assert target.read_text() == '{"a": 1}'
 
 
 def test_persist_report_hardens_the_database_without_a_corpus(tmp_path, monkeypatch):

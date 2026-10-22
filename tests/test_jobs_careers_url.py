@@ -114,16 +114,26 @@ def test_transient_resolution_failure_fails_open(monkeypatch):
     assert jobs._is_fetchable_url("http://careers.example/jobs") is True
 
 
-def test_long_company_name_skips_the_candidate_without_raising(monkeypatch):
-    """A >63-char label must not raise out of a documented never-raises path."""
+def test_long_label_survives_the_whole_fetch_chain(monkeypatch):
+    """The validator raising must not escape get_text.
+
+    Goes through the real http.get_text -> request -> validate_url chain
+    rather than mocking get_text, which is what made the earlier version of
+    this test unable to fail.
+    """
+    from lib import http as http_mod
+
     monkeypatch.setattr(
         jobs.socket, "getaddrinfo", mock.Mock(side_effect=UnicodeError("label too long"))
     )
-    with mock.patch.object(jobs.http, "get_text", return_value=None) as get_text:
-        assert jobs._resolve_careers_page(
-            "a" * 70, ("2026-01-01", "2026-01-31"), {}, backend="none"
-        ) == (None, None)
-    assert get_text.call_count >= 0  # never raised
+    monkeypatch.setattr(
+        http_mod.socket, "getaddrinfo", mock.Mock(side_effect=UnicodeError("label too long"))
+    )
+    long_host_url = "http://" + "a" * 64 + ".com/jobs"
+    # Refused, not raised: get_text returns None and the lane carries on.
+    assert http_mod.get_text(
+        long_host_url, retries=1, validate_url=jobs._is_fetchable_url
+    ) is None
 
 
 def test_unparsable_resolved_address_is_rejected(monkeypatch):
