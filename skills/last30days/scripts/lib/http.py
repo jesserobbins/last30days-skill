@@ -145,6 +145,12 @@ class _StripAuthOnCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
             return None
         if validator is not None:
             new.last30days_url_validator = validator
+            # The forced-direct decision is about the whole chain, not the
+            # first hop: without it a redirect under a proxy configuration
+            # would connect directly (the direct opener) while _should_pin
+            # concluded "proxied, so no pin".
+            if getattr(req, "last30days_force_direct", False):
+                new.last30days_force_direct = True
         if _request_origin(req.full_url) != _request_origin(new.full_url):
             for store in (new.headers, getattr(new, "unredirected_hdrs", None)):
                 if not store:
@@ -1014,6 +1020,11 @@ def request(
         raise ValueError("owned GET requires an operation deadline")
     if owned_get and bypass_proxy:
         raise ValueError("owned GET does not support proxy bypass")
+    if owned_get and validate_url is not None:
+        # The owned path fetches in a child worker via bounded_get, which
+        # rebuilds the Request: neither the validator nor the connect-time pin
+        # can travel with it, so accepting both would silently drop the check.
+        raise ValueError("owned GET does not support url validation")
     headers = headers or {}
     headers.setdefault("User-Agent", USER_AGENT)
 

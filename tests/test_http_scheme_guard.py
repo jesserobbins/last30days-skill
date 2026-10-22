@@ -408,3 +408,36 @@ class PinningIntegrationTest(unittest.TestCase):
             connection.connect()
 
         assert created == [socket.AF_INET6, socket.AF_INET]
+
+
+class PinningWiringTest(unittest.TestCase):
+    """The pin's decision inputs have to survive the redirect chain."""
+
+    def test_forced_direct_rides_the_redirect(self):
+        handler = http._StripAuthOnCrossOriginRedirect()
+        request = urllib.request.Request("http://careers.example/jobs")
+        request.last30days_url_validator = lambda candidate: True
+        request.last30days_force_direct = True
+
+        new = handler.redirect_request(
+            request, None, 302, "Found", {}, "http://careers.example/roles"
+        )
+
+        assert getattr(new, "last30days_force_direct", False) is True
+        # With a proxy configured for the target, only the flag keeps pinning on.
+        with mock.patch.object(
+            http.urllib.request, "getproxies", return_value={"http": "http://p:3128"}
+        ), mock.patch.object(http.urllib.request, "proxy_bypass", return_value=False):
+            assert http._should_pin(new) is True
+
+    def test_owned_get_with_a_validator_is_refused(self):
+        """bounded_get rebuilds the request, so the pin cannot travel there."""
+        with pytest.raises(ValueError) as error:
+            http.request(
+                "GET",
+                "https://careers.example/jobs",
+                owned_get=True,
+                deadline_monotonic=__import__("time").monotonic() + 5,
+                validate_url=lambda candidate: True,
+            )
+        assert "owned GET does not support url validation" in str(error.value)
