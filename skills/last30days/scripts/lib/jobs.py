@@ -18,6 +18,7 @@ tier produced results so synthesis knows the confidence level):
 from __future__ import annotations
 
 import json
+import ipaddress
 import re
 from html import unescape
 from typing import Any, Callable
@@ -121,6 +122,44 @@ def search_jobs(
 # Careers-page discovery
 # --------------------------------------------------------------------------- #
 
+_LOCAL_HOSTNAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost"})
+_PRIVATE_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+
+
+def _is_fetchable_url(url: str) -> bool:
+    """True when a search-derived URL is a public http(s) page.
+
+    A web-search result is attacker-influenceable input, so the careers probe
+    must not follow one onto the local network: a poisoned result aimed at
+    link-local metadata or an internal admin page would come back as a fetched
+    body and be parsed as if it were the company's careers page. Literal
+    addresses are judged with ``ipaddress``; hostnames are judged by name only,
+    since a resolution-time (DNS-rebinding) check is not something this seam can
+    see. The conventional candidates the caller builds itself are engine-owned
+    and never reach here.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").strip().strip(".").lower()
+    if not host:
+        return False
+    if host in _LOCAL_HOSTNAMES or host.endswith(_PRIVATE_HOST_SUFFIXES):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
 def _resolve_careers_page(
     company: str,
     date_range: tuple[str, str],
@@ -175,6 +214,8 @@ def _search_for_careers_url(
             continue
         url = str(raw.get("url") or "").strip()
         if not url:
+            continue
+        if not _is_fetchable_url(url):
             continue
         lowered = url.lower()
         if any(token in lowered for token in (

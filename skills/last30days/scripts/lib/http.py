@@ -33,6 +33,10 @@ MAX_RETRIES = 5
 MAX_429_RETRIES = 2
 RETRY_DELAY = 2.0
 
+# Research transports are http(s) only. The shared opener also handles file://,
+# ftp://, and data://, so the seam refuses everything else (see request()).
+ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
 
 # Longest a 429 retry may sleep on any host. Reddit's x-ratelimit-reset can say
 # 540s and GitHub's is an epoch timestamp; neither is worth parking a worker
@@ -600,6 +604,7 @@ def _is_dns_failure(err: urllib.error.URLError) -> bool:
 
 class HTTPError(Exception):
     """HTTP request error with status code."""
+
     def __init__(
         self,
         message: str,
@@ -808,8 +813,18 @@ def request(
         Parsed JSON response as dict, or raw text string if raw=True.
 
     Raises:
-        HTTPError: On request failure
+        HTTPError: On request failure, or when the URL is not http(s).
     """
+    # The opener below installs FileHandler/FTPHandler/DataHandler alongside
+    # the HTTP handlers, so anything other than http(s) is a local-file or
+    # unintended-transport read. Callers hand this seam URLs that came from
+    # outside the process (web-search results, pages parsed for links), so the
+    # scheme is checked here rather than trusted per call site.
+    scheme = urlsplit(url).scheme.lower()
+    if scheme not in ALLOWED_URL_SCHEMES:
+        raise HTTPError(
+            f"Refusing to fetch a non-HTTP(S) URL (scheme: {scheme or 'none'})"
+        )
     if owned_get and (method != "GET" or json_data is not None):
         raise ValueError("owned transport requires a bodyless GET")
     if owned_get and deadline_monotonic is None:
