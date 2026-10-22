@@ -114,9 +114,35 @@ def _request_origin(url: str) -> tuple[str, str, int]:
 
 class _StripAuthOnCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # The scheme allowlist in request() only covers the first hop: CPython's
+        # redirect handler accepts an ftp:// target and the shared opener then
+        # services it with FTPHandler. Refuse non-HTTP(S) targets here so a
+        # public page cannot redirect the engine onto another transport.
+        if urlsplit(newurl).scheme.lower() not in ALLOWED_URL_SCHEMES:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "Redirect to a non-HTTP(S) URL refused",
+                headers,
+                fp,
+            )
+        # A caller-supplied validator (the careers probe's public-address
+        # rule) must hold for every hop, not only the first one, or a public
+        # page can redirect to link-local metadata after passing the check.
+        validator = getattr(req, "last30days_url_validator", None)
+        if validator is not None and not validator(newurl):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "Redirect to a refused URL",
+                headers,
+                fp,
+            )
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is None:
             return None
+        if validator is not None:
+            new.last30days_url_validator = validator
         if _request_origin(req.full_url) != _request_origin(new.full_url):
             for store in (new.headers, getattr(new, "unredirected_hdrs", None)):
                 if not store:
@@ -788,6 +814,7 @@ def request(
     owned_get: bool = False,
     on_retry: Callable[[], None] | None = None,
     bypass_proxy: bool = False,
+    validate_url: Callable[[str], bool] | None = None,
 ) -> Union[Dict[str, Any], str]:
     """Make an HTTP request and return JSON response.
 
@@ -825,6 +852,8 @@ def request(
         raise HTTPError(
             f"Refusing to fetch a non-HTTP(S) URL (scheme: {scheme or 'none'})"
         )
+    if validate_url is not None and not validate_url(url):
+        raise HTTPError("Refusing to fetch a URL the caller's validator rejected")
     if owned_get and (method != "GET" or json_data is not None):
         raise ValueError("owned transport requires a bodyless GET")
     if owned_get and deadline_monotonic is None:
@@ -865,6 +894,10 @@ def request(
         headers.setdefault("Content-Type", "application/json")
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    if validate_url is not None:
+        # Ride the validator on the request so the redirect handler can apply
+        # it to every hop (see _StripAuthOnCrossOriginRedirect).
+        req.last30days_url_validator = validate_url
 
     def log_request(message: str) -> None:
         log(_scrub_fixture_value(message, redactions=fixture_redactions))
@@ -1161,6 +1194,7 @@ def get_text(
     retries: int = 2,
     accept: str = "*/*",
     headers: Optional[Dict[str, str]] = None,
+    validate_url: Callable[[str], bool] | None = None,
 ) -> Optional[str]:
     """Fetch a URL and return decoded text, or None on any failure.
 
@@ -1188,7 +1222,8 @@ def get_text(
         merged.update(headers)
     try:
         return request(
-            "GET", url, headers=merged, timeout=timeout, retries=retries, raw=True
+            "GET", url, headers=merged, timeout=timeout, retries=retries, raw=True,
+            validate_url=validate_url,
         )
     except HTTPError as e:
         log(f"get_text failed ({e}): {url}")

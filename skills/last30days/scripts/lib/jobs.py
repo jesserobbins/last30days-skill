@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import ipaddress
 import re
+import socket
 from html import unescape
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -132,16 +133,23 @@ def _is_fetchable_url(url: str) -> bool:
     A web-search result is attacker-influenceable input, so the careers probe
     must not follow one onto the local network: a poisoned result aimed at
     link-local metadata or an internal admin page would come back as a fetched
-    body and be parsed as if it were the company's careers page. Literal
-    addresses are judged with ``ipaddress``; hostnames are judged by name only,
-    since a resolution-time (DNS-rebinding) check is not something this seam can
-    see. The conventional candidates the caller builds itself are engine-owned
-    and never reach here.
+    body and be parsed as if it were the company's careers page.
+
+    The predicate is "globally reachable", not "not private": ``is_private``
+    is False for 100.64.0.0/10, so a negated list of flags admits the carrier-
+    grade NAT range that holds Alibaba Cloud's metadata endpoint
+    (100.100.100.200). Hostnames are judged by name only, since a
+    resolution-time (DNS-rebinding) check is not something this seam can see.
     """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").strip().strip(".").lower()
+    except ValueError:
+        # urlparse/.hostname raise on a malformed authority such as
+        # "http://[broken/about"; one bad search hit must not abort the probe.
         return False
-    host = (parsed.hostname or "").strip().strip(".").lower()
     if not host:
         return False
     if host in _LOCAL_HOSTNAMES or host.endswith(_PRIVATE_HOST_SUFFIXES):
@@ -149,15 +157,15 @@ def _is_fetchable_url(url: str) -> bool:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return True
-    return not (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-    )
+        # Not a canonical address. Reject non-canonical numeric spellings
+        # ("127.1", "2130706433", "0x7f.1") that ipaddress refuses but the
+        # resolver still accepts -- they can name any address, including ours.
+        try:
+            socket.inet_aton(host)
+        except OSError:
+            return True
+        return False
+    return bool(address.is_global) and not address.is_multicast
 
 
 def _resolve_careers_page(
@@ -188,7 +196,14 @@ def _resolve_careers_page(
     if backend != "none":
         careers_url = _search_for_careers_url(company, date_range, config, backend=backend)
         if careers_url:
-            html = http.get_text(careers_url, accept="text/html", retries=1)
+            # validate_url keeps the public-address rule on every redirect hop,
+            # so a public careers page cannot redirect to link-local metadata.
+            html = http.get_text(
+                careers_url,
+                accept="text/html",
+                retries=1,
+                validate_url=_is_fetchable_url,
+            )
             if html:
                 return html, careers_url
 

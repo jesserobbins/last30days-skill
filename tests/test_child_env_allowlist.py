@@ -130,6 +130,49 @@ def test_brightdata_child_env_never_inherits_secrets():
     assert with_key[brightdata.API_KEY_ENV] == "bd-test-not-real"
 
 
+def test_config_dir_vars_are_forwarded():
+    """A CLI that finds its own credentials through XDG_/APPDATA must keep them."""
+    with mock.patch.dict(
+        "os.environ",
+        {"XDG_CONFIG_HOME": "/tmp/xdg", "APPDATA": "C:/appdata", "OPENAI_API_KEY": "sk-test"},
+        clear=False,
+    ):
+        env = subproc.child_env()
+    assert env["XDG_CONFIG_HOME"] == "/tmp/xdg"
+    assert env["APPDATA"] == "C:/appdata"
+    assert "OPENAI_API_KEY" not in env
+
+
+def test_brightdata_omits_an_empty_key_variable():
+    from lib import brightdata
+
+    env = brightdata._child_env("")
+    assert brightdata.API_KEY_ENV not in env
+
+
+def test_keychain_lookup_does_not_inherit_secrets():
+    """The child that reads the Safe Storage passphrase gets the allowlist too."""
+    from lib import chrome_cookies
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return mock.Mock(returncode=1, stdout="", stderr="")
+
+    with mock.patch.dict("os.environ", SECRETS, clear=False), mock.patch.object(
+        chrome_cookies.subprocess, "run", side_effect=fake_run
+    ):
+        chrome_cookies._get_chromium_encryption_key("Chrome Safe Storage")
+
+    assert captured["cmd"][0] == "security"
+    env = captured["env"]
+    assert env is not None, "keychain child must get an explicit env"
+    for name in SECRETS:
+        assert name not in env
+
+
 def test_cookie_decrypt_does_not_inherit_secrets():
     from lib import chrome_cookies
 

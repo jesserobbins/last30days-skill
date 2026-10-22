@@ -76,6 +76,9 @@ def _get_chromium_encryption_key(service_name: str) -> Optional[bytes]:
             capture_output=True,
             text=True,
             timeout=10,
+            # This child hands back the browser's Safe Storage passphrase; it
+            # needs no ambient credential beyond the allowlist.
+            env=subproc.child_env(),
         )
         if result.returncode != 0:
             logger.info("%s Keychain access denied or browser not installed: %s", service_name, result.stderr.strip())

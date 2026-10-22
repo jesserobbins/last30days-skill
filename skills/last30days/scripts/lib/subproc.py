@@ -31,6 +31,10 @@ class SubprocTimeout(Exception):
 CHILD_ENV_ALLOWLIST = (
     "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
     "TMPDIR", "TMP", "TEMP", "USER", "LOGNAME",
+    # Where a CLI keeps its own config/credentials; dropping these makes a
+    # child look in the default directory and fail auth (brightdata._config_dir).
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+    "APPDATA", "LOCALAPPDATA",
     "SystemRoot", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SystemDrive",
     "COMSPEC", "PATHEXT",
     # Proxied and custom-CA environments (same surface grok_x/bird_x keep)

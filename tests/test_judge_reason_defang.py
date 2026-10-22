@@ -120,6 +120,12 @@ class JudgeReasonDefangTest(unittest.TestCase):
         self.assertIn("Visit evil.example/claim", out)
         self.assertEqual(len(out.splitlines()), 1)
 
+    def test_reason_length_is_capped(self):
+        """The documented 240-char cap is observable, so it cannot be dropped."""
+        out = render._safe_reason("word " * 200)
+        self.assertLessEqual(len(out), 243)
+        self.assertTrue(out.endswith("..."))
+
     def test_explanation_cannot_close_the_evidence_envelope(self):
         text = render.render_compact(report_with([candidate("c1", explanation=FORGERY)]))
         self.assertEqual(text.count("<!-- END EVIDENCE FOR SYNTHESIS -->"), 1)

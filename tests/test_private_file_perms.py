@@ -62,11 +62,41 @@ def test_persist_report_hardens_the_database_without_a_corpus(tmp_path, monkeypa
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX modes only")
-def test_db_is_not_group_readable_after_init(tmp_path):
+def test_init_db_tightens_an_already_loose_database(tmp_path):
+    """init_db is the choke point, so it must fix a permissive pre-existing DB."""
     import store as store_mod
 
     db_path = tmp_path / "research.db"
     with store_mod.scoped_db(db_path):
         store_mod.init_db()
-        store_mod.ensure_private_db_files()
+    db_path.chmod(0o644)
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{db_path}{suffix}")
+        if sidecar.exists():
+            sidecar.chmod(0o644)
+
+    with store_mod.scoped_db(db_path):
+        store_mod.init_db()
+
     assert _mode(db_path) == 0o600
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{db_path}{suffix}")
+        if sidecar.exists():
+            assert _mode(sidecar) == 0o600
+
+
+def test_unowned_database_does_not_raise(tmp_path, monkeypatch):
+    """A chmod we are not allowed to perform must not abort a store run."""
+    import store as store_mod
+
+    db_path = tmp_path / "research.db"
+    real_chmod = Path.chmod
+
+    def refusing_chmod(self, mode, *args, **kwargs):
+        if self == db_path:
+            raise PermissionError("not the owner")
+        return real_chmod(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", refusing_chmod)
+    with store_mod.scoped_db(db_path):
+        assert store_mod.init_db() == db_path

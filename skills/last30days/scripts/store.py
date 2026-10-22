@@ -71,7 +71,11 @@ def ensure_private_db_files(db_path: Optional[Path] = None) -> Path:
     for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
         try:
             candidate.chmod(0o600)
-        except FileNotFoundError:
+        except OSError:
+            # Hardening is best-effort: the mode decision that matters already
+            # happened at creation. A group-writable file we do not own must
+            # not turn every store entry point into a PermissionError, and in
+            # init_db's finally block it must not mask the real exception.
             pass
     return path
 

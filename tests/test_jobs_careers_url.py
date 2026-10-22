@@ -32,6 +32,13 @@ def _search_result(url: str) -> list[dict]:
         "http://172.16.4.4/jobs",
         "http://localhost/careers",
         "http://metadata.google.internal/jobs",
+        # Carrier-grade NAT (100.64.0.0/10) holds Alibaba Cloud's metadata
+        # endpoint; ipaddress.is_private is False for it.
+        "http://100.100.100.200/latest/meta-data/careers",
+        # Non-canonical numeric spellings that ipaddress rejects but the
+        # resolver still honours.
+        "http://127.1/jobs",
+        "http://2130706433/jobs",
         "file:///etc/careers",
     ],
 )
@@ -40,6 +47,18 @@ def test_search_result_cannot_point_at_the_local_network(url):
         assert jobs._search_for_careers_url(
             "Acme", ("2026-01-01", "2026-01-31"), {}, backend="duckduckgo"
         ) is None
+
+
+def test_malformed_search_hit_does_not_abort_the_probe():
+    """One unparsable hit must be skipped, not raise out of discovery."""
+    results = [
+        {"title": "broken", "url": "http://[broken/about", "snippet": "careers"},
+        {"title": "Acme careers", "url": "https://boards.greenhouse.io/acme"},
+    ]
+    with mock.patch.object(jobs.grounding, "web_search", return_value=(results, {})):
+        assert jobs._search_for_careers_url(
+            "Acme", ("2026-01-01", "2026-01-31"), {}, backend="duckduckgo"
+        ) == "https://boards.greenhouse.io/acme"
 
 
 def test_public_careers_url_is_still_accepted():

@@ -165,7 +165,9 @@ def _child_env(api_key: str) -> Dict[str, str]:
     ``None``, which ``subprocess`` reads as "inherit everything".
     """
     return subproc.child_env(
-        extra={API_KEY_ENV: api_key},
+        # An empty-but-present BRIGHTDATA_API_KEY= would make a CLI that tests
+        # for presence skip its own credentials-file fallback.
+        extra={API_KEY_ENV: api_key} if api_key else None,
         prefix_allow=("BRIGHTDATA_",),
     )
 

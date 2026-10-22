@@ -1445,7 +1445,11 @@ def _update_cached_freshness(
             {"entity": label, "report": schema.to_dict(cached_report)}
             for label, cached_report in cached_reports
         ]
-        cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # Rewrites last-report.json, which embeds report evidence; keep it
+        # owner-only rather than inheriting whatever mode the file had.
+        write_private_text(
+            cache_path, json.dumps(payload, indent=2), encoding="utf-8"
+        )
         return True
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         sys.stderr.write(

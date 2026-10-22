@@ -162,7 +162,8 @@ def run_auto_setup(config: Dict[str, Any], *, allow_browser_cookies: bool = Fals
             proc = subprocess.run(
                 ["brew", "install", "yt-dlp"],
                 capture_output=True, text=True, timeout=120,
-                env=subproc.child_env(),
+                # HOMEBREW_* carries the user's mirror and auto-update policy.
+                env=subproc.child_env(prefix_allow=("HOMEBREW_",)),
             )
             if proc.returncode == 0:
                 ytdlp_installed = True
