@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 from . import brightdata
 from .private_files import write_private_text
+from . import subproc
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,7 @@ def run_auto_setup(config: Dict[str, Any], *, allow_browser_cookies: bool = Fals
             proc = subprocess.run(
                 ["brew", "install", "yt-dlp"],
                 capture_output=True, text=True, timeout=120,
+                env=subproc.child_env(),
             )
             if proc.returncode == 0:
                 ytdlp_installed = True
@@ -312,6 +314,9 @@ def _run_npx_install(slug: str) -> Tuple[str, str]:
         proc = subprocess.run(
             [npx, "-y", PRINTING_PRESS_NPM, "install", slug, "--cli-only"],
             capture_output=True, text=True, timeout=DIGG_INSTALL_TIMEOUT,
+            env=subproc.child_env(
+                prefix_allow=("npm_config_", "NPM_CONFIG_", "NODE_"),
+            ),
         )
     except Exception as exc:
         logger.warning("npx install %s exception: %s", slug, exc)

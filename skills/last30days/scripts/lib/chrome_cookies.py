@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from . import subproc
 from .cookie_paths import path_exists, path_is_dir
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,8 @@ def _decrypt_v10_value(encrypted_value: bytes, aes_key: bytes, db_version: int) 
             input=ciphertext,
             capture_output=True,
             timeout=5,
+            # openssl needs no ambient credential beyond its own args.
+            env=subproc.child_env(),
         )
         if result.returncode != 0:
             logger.debug("openssl decryption failed: %s", result.stderr.decode(errors="replace").strip())
