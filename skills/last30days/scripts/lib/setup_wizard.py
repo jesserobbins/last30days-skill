@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 from . import brightdata
 from .private_files import write_private_text
+from . import subproc
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,8 @@ def run_auto_setup(config: Dict[str, Any], *, allow_browser_cookies: bool = Fals
             proc = subprocess.run(
                 ["brew", "install", "yt-dlp"],
                 capture_output=True, text=True, timeout=120,
+                # HOMEBREW_* carries the user's mirror and auto-update policy.
+                env=subproc.child_env(prefix_allow=("HOMEBREW_",)),
             )
             if proc.returncode == 0:
                 ytdlp_installed = True
@@ -312,6 +315,9 @@ def _run_npx_install(slug: str) -> Tuple[str, str]:
         proc = subprocess.run(
             [npx, "-y", PRINTING_PRESS_NPM, "install", slug, "--cli-only"],
             capture_output=True, text=True, timeout=DIGG_INSTALL_TIMEOUT,
+            env=subproc.child_env(
+                prefix_allow=("npm_config_", "NPM_CONFIG_", "NODE_"),
+            ),
         )
     except Exception as exc:
         logger.warning("npx install %s exception: %s", slug, exc)
@@ -1321,7 +1327,13 @@ def _start_device_flow() -> "Tuple[Dict[str, Any], Optional[Dict[str, Any]]]":
     clipboard_ok = False
     if sys.platform == "darwin":
         try:
-            subprocess.run(["pbcopy"], input=user_code.encode(), check=True, timeout=5)
+            subprocess.run(
+                ["pbcopy"],
+                input=user_code.encode(),
+                check=True,
+                timeout=5,
+                env=subproc.child_env(),
+            )
             clipboard_ok = True
         except Exception:
             pass  # pbcopy unavailable or failed, fall through

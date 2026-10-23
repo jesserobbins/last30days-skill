@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import ANY, patch, MagicMock
 
 import pytest
 
@@ -277,6 +277,9 @@ class TestYtdlpAutoInstall:
         mock_subproc.assert_called_once_with(
             ["brew", "install", "yt-dlp"],
             capture_output=True, text=True, timeout=120,
+            # The child gets an allowlisted env rather than the parent's
+            # (tests/test_child_env_allowlist.py asserts what is in it).
+            env=ANY,
         )
         assert results["ytdlp_installed"] is True
         assert results["ytdlp_action"] == "installed"
@@ -420,6 +423,7 @@ class TestDiggAutoInstall:
         mock_subproc.assert_any_call(
             ["/opt/homebrew/bin/npx", "-y", setup_wizard.PRINTING_PRESS_NPM, "install", "digg", "--cli-only"],
             capture_output=True, text=True, timeout=setup_wizard.DIGG_INSTALL_TIMEOUT,
+            env=ANY,
         )
         assert results["digg_installed"] is True
         assert results["digg_action"] == "installed"
@@ -454,6 +458,7 @@ class TestDiggAutoInstall:
         mock_subproc.assert_any_call(
             [windows_npx, "-y", setup_wizard.PRINTING_PRESS_NPM, "install", "digg", "--cli-only"],
             capture_output=True, text=True, timeout=setup_wizard.DIGG_INSTALL_TIMEOUT,
+            env=ANY,
         )
         assert results["digg_installed"] is True
         assert results["digg_action"] == "installed"

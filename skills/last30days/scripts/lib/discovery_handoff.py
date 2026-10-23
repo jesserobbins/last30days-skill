@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
 from . import env, log, pipeline, rerank, schema
+from .private_files import write_private_text
 
 
 # How long a nominations bundle stays valid. Deliberately a module constant
@@ -330,7 +331,9 @@ def write_nominations_bundle(
     path = nominations_bundle_path(state_dir)
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # The bundle carries full SourceItem bodies -- including private corpus
+        # text when a corpus is configured -- so it is owner-only.
+        write_private_text(path, json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
         # A locked/read-only/full disk is the protocol's clean exit-2 path,
         # never a traceback.

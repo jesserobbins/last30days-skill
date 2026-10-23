@@ -25,6 +25,59 @@ class SubprocTimeout(Exception):
         self.started = started
 
 
+#: Env names a third-party child may inherit: platform/runtime basics and the
+#: proxy/CA settings a network CLI needs. Nothing here identifies a person or
+#: authorizes anything on its own.
+CHILD_ENV_ALLOWLIST = (
+    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    "TMPDIR", "TMP", "TEMP", "USER", "LOGNAME",
+    # Where a CLI keeps its own config/credentials; dropping these makes a
+    # child look in the default directory and fail auth (brightdata._config_dir).
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+    "APPDATA", "LOCALAPPDATA",
+    "SystemRoot", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SystemDrive",
+    "COMSPEC", "PATHEXT",
+    # Proxied and custom-CA environments (same surface grok_x/bird_x keep)
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+)
+
+
+def child_env(
+    extra: Optional[dict[str, str]] = None,
+    *,
+    prefix_allow: Sequence[str] = (),
+) -> dict[str, str]:
+    """Build a minimal environment for a binary this project does not own.
+
+    Third-party children (npx, brew, agentcookie, the Bright Data CLI,
+    openssl/security) have no business seeing the user's API keys, browser
+    cookies, or cloud credentials, so they get the allowlist above plus only
+    the prefixes and values the caller names. Returns a new dict -- never
+    ``None``, because ``subprocess`` reads ``None`` as "inherit everything".
+
+    ``bird_x`` and ``grok_x`` keep their own allowlists for their own
+    children; this is the shared default for everything else.
+    """
+    env = {
+        name: os.environ[name]
+        for name in CHILD_ENV_ALLOWLIST
+        if name in os.environ
+    }
+    for prefix in prefix_allow:
+        env.update({
+            name: value
+            for name, value in os.environ.items()
+            if name.startswith(prefix)
+        })
+    if extra:
+        env.update({
+            name: value for name, value in extra.items() if value is not None
+        })
+    return env
+
+
 # Live run_with_timeout children, process-wide. Each child is a session
 # leader (os.setsid), so a group kill aimed at the engine never reaches it;
 # the engine's SIGTERM handler and atexit hook drain this set instead. It
@@ -87,6 +140,7 @@ def _taskkill_pid(pid: int, timeout: float = 2) -> bool:
             stderr=subprocess.DEVNULL,
             timeout=timeout,
             check=False,
+            env=child_env(),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired):

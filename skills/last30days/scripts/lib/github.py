@@ -17,7 +17,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
-from . import dates, env, http, log, schema
+from . import dates, env, http, log, schema, subproc
 from .query import extract_core_subject
 from .relevance import token_overlap_relevance
 
@@ -58,6 +58,9 @@ def _resolve_token(token: Optional[str] = None) -> Optional[str]:
         result = subprocess.run(
             ["gh", "auth", "token"],
             capture_output=True, text=True, timeout=5,
+            # gh reads its own config under HOME/XDG/GH_*; it does not need the
+            # engine's other credentials.
+            env=subproc.child_env(prefix_allow=("GH_",)),
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()

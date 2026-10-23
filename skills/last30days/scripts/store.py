@@ -71,7 +71,11 @@ def ensure_private_db_files(db_path: Optional[Path] = None) -> Path:
     for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
         try:
             candidate.chmod(0o600)
-        except FileNotFoundError:
+        except OSError:
+            # Hardening is best-effort: the mode decision that matters already
+            # happened at creation. A group-writable file we do not own must
+            # not turn every store entry point into a PermissionError, and in
+            # init_db's finally block it must not mask the real exception.
             pass
     return path
 
@@ -265,9 +269,16 @@ def _connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 
 def init_db(db_path: Optional[Path] = None) -> Path:
-    """Create database and tables if they don't exist. Returns the DB path."""
+    """Create database and tables if they don't exist. Returns the DB path.
+
+    Findings hold the same evidence text as a saved report, so the database and
+    its WAL sidecars are owner-only from creation. Hardening here rather than
+    at each caller covers the store path, the discovery queue, and scoped
+    save-dir databases with one choke point.
+    """
     path = db_path or _get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_db_files(path)
 
     conn = _connect(path)
     try:
@@ -290,6 +301,8 @@ def init_db(db_path: Optional[Path] = None) -> Path:
         _backfill_owner_sightings(conn)
     finally:
         conn.close()
+        # WAL/shm sidecars are created by the connection, not by us.
+        ensure_private_db_files(path)
 
     return path
 

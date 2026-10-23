@@ -1701,7 +1701,7 @@ class TestYouTubeSearchTimeoutAndCache(unittest.TestCase):
         release = threading.Event()
         contender_reached = threading.Event()
 
-        def slow_run(cmd, timeout=None):
+        def slow_run(cmd, timeout=None, **kwargs):
             if started.is_set():
                 contender_reached.set()
             started.set()

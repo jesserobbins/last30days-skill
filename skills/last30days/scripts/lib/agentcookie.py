@@ -31,7 +31,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import log
+from . import log, subproc
 
 AGENTCOOKIE_BIN = "agentcookie"
 X_COOKIE_DOMAIN = ".x.com"
@@ -165,6 +165,9 @@ def read_x_cookies(config: Optional[Dict[str, Any]] = None) -> Optional[Dict[str
             capture_output=True,
             text=True,
             timeout=_TIMEOUT_SECONDS,
+            # The sidecar reads its own config under HOME; it never needs the
+            # engine's API keys or cookies in its environment.
+            env=subproc.child_env(prefix_allow=("AGENTCOOKIE_", "BROWSER_")),
         )
     except subprocess.TimeoutExpired:
         _log(f"timed out after {_TIMEOUT_SECONDS}s; skipping")

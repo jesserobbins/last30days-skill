@@ -237,15 +237,22 @@ def test_api_key_travels_in_the_environment_never_in_argv(monkeypatch):
     assert seen["env"]["BRIGHTDATA_API_KEY"] == "dummy-key"
 
 
-def test_no_key_means_the_child_simply_inherits_the_parent_env(monkeypatch):
+def test_no_key_still_gets_an_allowlisted_env(monkeypatch):
+    """The CLI reads its own credentials file under HOME; it does not need --
+    and must not receive -- the engine's API keys and cookies."""
     _installed(monkeypatch)
     seen = {}
     monkeypatch.setattr(
         subproc, "run_with_timeout",
         lambda cmd, **k: seen.update(env=k.get("env")) or _Result(stdout="[]"),
     )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
     brightdata.run_pipeline("amazon_product", ["u"], timeout=30, config={})
-    assert seen["env"] is None
+    env = seen["env"]
+    assert env is not None, "child env must be explicit, never inherited"
+    assert "OPENAI_API_KEY" not in env
+    assert "AUTH_TOKEN" not in env
+    assert "PATH" in env
 
 
 def test_positional_params_are_fenced_behind_a_double_dash(monkeypatch):

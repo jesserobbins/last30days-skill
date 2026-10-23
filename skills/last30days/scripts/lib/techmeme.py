@@ -110,7 +110,11 @@ def _run_cli(cmd: List[str], timeout: int) -> Dict[str, Any]:
     if not _is_available():
         return {"results": [], "error": f"{CLI_BIN} not on PATH"}
     try:
-        result = subproc.run_with_timeout(cmd, timeout=timeout)
+        # A network CLI installed from outside this repo must not
+        # inherit the engine's credentials.
+        result = subproc.run_with_timeout(
+            cmd, timeout=timeout, env=subproc.child_env()
+        )
     except subproc.SubprocTimeout as exc:
         _log(f"Timeout: {exc}")
         return {"results": [], "error": str(exc)}

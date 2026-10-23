@@ -10,6 +10,8 @@ import socket
 import threading
 import time
 import urllib.error
+import http.client
+import ipaddress
 import urllib.request
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -32,6 +34,10 @@ def log(msg: str):
 MAX_RETRIES = 5
 MAX_429_RETRIES = 2
 RETRY_DELAY = 2.0
+
+# Research transports are http(s) only. The shared opener also handles file://,
+# ftp://, and data://, so the seam refuses everything else (see request()).
+ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 
 
 # Longest a 429 retry may sleep on any host. Reddit's x-ratelimit-reset can say
@@ -110,9 +116,41 @@ def _request_origin(url: str) -> tuple[str, str, int]:
 
 class _StripAuthOnCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # The scheme allowlist in request() only covers the first hop: CPython's
+        # redirect handler accepts an ftp:// target and the shared opener then
+        # services it with FTPHandler. Refuse non-HTTP(S) targets here so a
+        # public page cannot redirect the engine onto another transport.
+        if urlsplit(newurl).scheme.lower() not in ALLOWED_URL_SCHEMES:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "Redirect to a non-HTTP(S) URL refused",
+                headers,
+                fp,
+            )
+        # A caller-supplied validator (the careers probe's public-address
+        # rule) must hold for every hop, not only the first one, or a public
+        # page can redirect to link-local metadata after passing the check.
+        validator = getattr(req, "last30days_url_validator", None)
+        if validator is not None and not validator(newurl):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "Redirect to a refused URL",
+                headers,
+                fp,
+            )
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is None:
             return None
+        if validator is not None:
+            new.last30days_url_validator = validator
+            # The forced-direct decision is about the whole chain, not the
+            # first hop: without it a redirect under a proxy configuration
+            # would connect directly (the direct opener) while _should_pin
+            # concluded "proxied, so no pin".
+            if getattr(req, "last30days_force_direct", False):
+                new.last30days_force_direct = True
         if _request_origin(req.full_url) != _request_origin(new.full_url):
             for store in (new.headers, getattr(new, "unredirected_hdrs", None)):
                 if not store:
@@ -123,9 +161,159 @@ class _StripAuthOnCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
         return new
 
 
-_opener = urllib.request.build_opener(_StripAuthOnCrossOriginRedirect)
+def _is_globally_reachable(address: str) -> bool:
+    """True only for a globally reachable, non-multicast address."""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return bool(parsed.is_global) and not parsed.is_multicast
+
+
+def _pinned_create_connection(address, timeout=None, source_address=None):
+    """``socket.create_connection`` that dials only approved addresses.
+
+    Validating the *name* before the fetch leaves a rebinding window: the
+    lookup that cleared the URL and the lookup ``http.client`` performs when it
+    connects are separate, so an attacker-controlled zone can answer publicly
+    for the first and with 127.0.0.1 for the second. Resolving here, filtering,
+    and connecting only to what survives closes that window.
+
+    Every approved answer is tried in the order getaddrinfo returned it, and a
+    rejected answer is never a fallback -- that is what makes this different
+    from plain ``create_connection``. The host name is *not* substituted: it
+    still drives the ``Host`` header and the TLS ``server_hostname``, so
+    certificate verification is untouched.
+
+    This replaces http.client's per-instance ``_create_connection`` hook
+    rather than overriding ``connect``, because ``HTTPSConnection.connect`` is
+    where ``self._context.wrap_socket(...)`` happens. Overriding ``connect``
+    drops TLS entirely.
+    """
+    host, port = address
+    try:
+        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as error:
+        raise urllib.error.URLError(
+            f"could not resolve {host}: {error}"
+        ) from error
+    approved = [
+        info for info in infos if _is_globally_reachable(info[4][0].split("%")[0])
+    ]
+    if not approved:
+        raise urllib.error.URLError(
+            f"refusing to connect to a non-public address for {host}"
+        )
+    failures: list[OSError] = []
+    for family, socktype, proto, _canonname, sockaddr in approved:
+        sock = None
+        try:
+            # Creation belongs inside the loop: on a host without IPv6
+            # support, socket.socket raises EAFNOSUPPORT for an approved AAAA
+            # answer, and plain create_connection would fall through to the
+            # next address rather than lose the request.
+            sock = socket.socket(family, socktype, proto)
+            if timeout is not None:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as error:
+            failures.append(error)
+            if sock is not None:
+                sock.close()
+    raise failures[-1]
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that resolves and filters at connect time."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_create_connection
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that resolves and filters at connect time.
+
+    Only the connection hook is replaced. ``HTTPSConnection.connect`` still
+    runs, so the socket is wrapped with the request's SSL context and the
+    original hostname as ``server_hostname``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_create_connection
+
+
+def _should_pin(req) -> bool:
+    """True when this request must connect only to an approved address.
+
+    Decided per request -- which means per redirect hop -- because proxy
+    routing is per URL: a proxied request redirecting to a NO_PROXY host goes
+    direct, and an unproxied one redirecting into a proxied host does not.
+    Pinning a proxied hop would be meaningless (the socket goes to the proxy,
+    which resolves the name itself), and leaving a direct hop unpinned is the
+    rebinding window, so the decision has to travel with the URL.
+    """
+    if getattr(req, "last30days_url_validator", None) is None:
+        return False
+    if getattr(req, "last30days_force_direct", False):
+        return True
+    return not _proxy_applies(req.full_url)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    """HTTPHandler that pins the hops that will actually go direct."""
+
+    def http_open(self, req):
+        if not _should_pin(req):
+            return super().http_open(req)
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        if not _should_pin(req):
+            return super().https_open(req)
+        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
+
+
+def _proxy_applies(url: str) -> bool:
+    """True when urllib would route this URL through a proxy.
+
+    Pinning cannot survive a proxy (the socket goes to the proxy, which does
+    its own resolution), so the pinned opener is only used for requests that
+    go direct. This asks urllib the same question it asks itself: the
+    environment *and* the platform's system proxy settings, honoured
+    per-scheme and subject to NO_PROXY.
+    """
+    try:
+        proxies = urllib.request.getproxies()
+        scheme = urlsplit(url).scheme.lower()
+        if scheme not in proxies:
+            return False
+        hostname = urlsplit(url).hostname or ""
+        return not urllib.request.proxy_bypass(hostname)
+    except Exception:
+        # Any doubt means "a proxy might apply", which is the non-pinning path.
+        return True
+
+
+# Both openers carry the pinning handlers; whether a given request pins is
+# decided per hop in _should_pin, so a redirect that changes routing class
+# (proxied <-> direct) is handled the same way as a fresh request.
+_opener = urllib.request.build_opener(
+    _PinnedHTTPHandler,
+    _PinnedHTTPSHandler,
+    _StripAuthOnCrossOriginRedirect,
+)
 _direct_opener = urllib.request.build_opener(
-    urllib.request.ProxyHandler({}), _StripAuthOnCrossOriginRedirect
+    urllib.request.ProxyHandler({}),
+    _PinnedHTTPHandler,
+    _PinnedHTTPSHandler,
+    _StripAuthOnCrossOriginRedirect,
 )
 _DEFAULT_URLOPEN = urllib.request.urlopen
 
@@ -135,6 +323,8 @@ def _open_request(req, timeout, *, bypass_proxy=False):
     current = urllib.request.urlopen
     if current is not _DEFAULT_URLOPEN:
         return current(req, timeout=timeout)
+    if bypass_proxy:
+        req.last30days_force_direct = True
     opener = _direct_opener if bypass_proxy else _opener
     return opener.open(req, timeout=timeout)
 
@@ -600,6 +790,7 @@ def _is_dns_failure(err: urllib.error.URLError) -> bool:
 
 class HTTPError(Exception):
     """HTTP request error with status code."""
+
     def __init__(
         self,
         message: str,
@@ -783,6 +974,7 @@ def request(
     owned_get: bool = False,
     on_retry: Callable[[], None] | None = None,
     bypass_proxy: bool = False,
+    validate_url: Callable[[str], bool] | None = None,
 ) -> Union[Dict[str, Any], str]:
     """Make an HTTP request and return JSON response.
 
@@ -808,14 +1000,31 @@ def request(
         Parsed JSON response as dict, or raw text string if raw=True.
 
     Raises:
-        HTTPError: On request failure
+        HTTPError: On request failure, or when the URL is not http(s).
     """
+    # The opener below installs FileHandler/FTPHandler/DataHandler alongside
+    # the HTTP handlers, so anything other than http(s) is a local-file or
+    # unintended-transport read. Callers hand this seam URLs that came from
+    # outside the process (web-search results, pages parsed for links), so the
+    # scheme is checked here rather than trusted per call site.
+    scheme = urlsplit(url).scheme.lower()
+    if scheme not in ALLOWED_URL_SCHEMES:
+        raise HTTPError(
+            f"Refusing to fetch a non-HTTP(S) URL (scheme: {scheme or 'none'})"
+        )
+    if validate_url is not None and not validate_url(url):
+        raise HTTPError("Refusing to fetch a URL the caller's validator rejected")
     if owned_get and (method != "GET" or json_data is not None):
         raise ValueError("owned transport requires a bodyless GET")
     if owned_get and deadline_monotonic is None:
         raise ValueError("owned GET requires an operation deadline")
     if owned_get and bypass_proxy:
         raise ValueError("owned GET does not support proxy bypass")
+    if owned_get and validate_url is not None:
+        # The owned path fetches in a child worker via bounded_get, which
+        # rebuilds the Request: neither the validator nor the connect-time pin
+        # can travel with it, so accepting both would silently drop the check.
+        raise ValueError("owned GET does not support url validation")
     headers = headers or {}
     headers.setdefault("User-Agent", USER_AGENT)
 
@@ -850,6 +1059,10 @@ def request(
         headers.setdefault("Content-Type", "application/json")
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    if validate_url is not None:
+        # Ride the validator on the request so the redirect handler can apply
+        # it to every hop (see _StripAuthOnCrossOriginRedirect).
+        req.last30days_url_validator = validate_url
 
     def log_request(message: str) -> None:
         log(_scrub_fixture_value(message, redactions=fixture_redactions))
@@ -1146,6 +1359,7 @@ def get_text(
     retries: int = 2,
     accept: str = "*/*",
     headers: Optional[Dict[str, str]] = None,
+    validate_url: Callable[[str], bool] | None = None,
 ) -> Optional[str]:
     """Fetch a URL and return decoded text, or None on any failure.
 
@@ -1173,7 +1387,8 @@ def get_text(
         merged.update(headers)
     try:
         return request(
-            "GET", url, headers=merged, timeout=timeout, retries=retries, raw=True
+            "GET", url, headers=merged, timeout=timeout, retries=retries, raw=True,
+            validate_url=validate_url,
         )
     except HTTPError as e:
         log(f"get_text failed ({e}): {url}")

@@ -19,7 +19,7 @@ from pathlib import Path
 from shutil import which
 from typing import Any, Iterable
 
-from . import entity_extract, log, relevance, schema
+from . import entity_extract, log, relevance, schema, subproc
 
 SOURCE = "corpus"
 SUPPORTED_SUFFIXES = {".md", ".txt", ".pdf"}
@@ -294,6 +294,9 @@ def _extract_text(path: Path, *, pdftotext: str | None) -> str:
             check=True,
             text=True,
             timeout=20,
+            # Extracting text from a user's own PDF is the last child that
+            # should receive the engine's API keys.
+            env=subproc.child_env(),
         )
         return completed.stdout[:MAX_TEXT_CHARS]
     with path.open("r", encoding="utf-8", errors="replace") as handle:

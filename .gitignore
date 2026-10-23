@@ -50,3 +50,5 @@ docs/brainstorms/
 /work
 /print
 .worktrees
+# roborev snapshots
+/.roborev/

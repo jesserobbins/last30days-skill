@@ -156,16 +156,24 @@ def _build_args(
     ]
 
 
-def _child_env(api_key: str) -> Optional[Dict[str, str]]:
+def _child_env(api_key: str) -> Dict[str, str]:
     """Environment for the child process, carrying the key when we have one.
 
-    Returns None when there is nothing to inject, so the child simply
-    inherits the parent environment (the common case: the CLI owns its own
-    credentials file, or the key is already exported).
+    The CLI owns its own credential file under ``HOME``, so it never needs the
+    parent environment. It gets the shared allowlist plus ``BRIGHTDATA_*``
+    settings, and this module's own key when one is configured -- never
+    ``None``, which ``subprocess`` reads as "inherit everything".
     """
-    if not api_key:
-        return None
-    return {**os.environ, API_KEY_ENV: api_key}
+    env = subproc.child_env(prefix_allow=("BRIGHTDATA_",))
+    # An empty-but-present BRIGHTDATA_API_KEY= would make a CLI that tests for
+    # presence skip its own credentials-file fallback. That includes a blank
+    # value inherited through the prefix above.
+    if api_key:
+        env.update({API_KEY_ENV: api_key})
+    else:
+        # pop() as well, because prefix_allow copied it in if it was set-but-blank
+        env.pop(API_KEY_ENV, None)
+    return env
 
 
 def _scrub(text: str, secret: str) -> str:

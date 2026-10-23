@@ -238,7 +238,9 @@ def _run(command: list[str], timeout: float = 120.0) -> bool:
     process-group level (os.setsid/killpg) instead of orphaning child trees.
     """
     try:
-        result = subproc.run_with_timeout(command, timeout=int(timeout))
+        result = subproc.run_with_timeout(
+            command, timeout=int(timeout), env=subproc.child_env()
+        )
     except (subproc.SubprocTimeout, FileNotFoundError, OSError):
         return False
     return result.returncode == 0

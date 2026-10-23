@@ -18,7 +18,9 @@ tier produced results so synthesis knows the confidence level):
 from __future__ import annotations
 
 import json
+import ipaddress
 import re
+import socket
 from html import unescape
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -121,6 +123,111 @@ def search_jobs(
 # Careers-page discovery
 # --------------------------------------------------------------------------- #
 
+_LOCAL_HOSTNAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost"})
+_PRIVATE_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+
+
+def _is_fetchable_url(url: str) -> bool:
+    """True when a search-derived URL is a public http(s) page.
+
+    A web-search result is attacker-influenceable input, so the careers probe
+    must not follow one onto the local network: a poisoned result aimed at
+    link-local metadata or an internal admin page would come back as a fetched
+    body and be parsed as if it were the company's careers page.
+
+    The predicate is "globally reachable", not "not private": ``is_private``
+    is False for 100.64.0.0/10, so a negated list of flags admits the carrier-
+    grade NAT range that holds Alibaba Cloud's metadata endpoint
+    (100.100.100.200).
+
+    Hostnames are resolved and rejected when any answer is non-global, which
+    closes the cheap case of an attacker-owned name whose A record points at
+    127.0.0.1. A transient resolution failure fails open -- an unresolvable
+    host cannot be fetched, and keeping the predicate total keeps offline runs
+    independent of DNS -- while an invalid label is rejected, because it can
+    never be fetched safely.
+
+    This predicate is only ever passed as ``http``'s ``validate_url``, which
+    does two things: it rejects redirect hops that fail it, and it makes the
+    request connect only to an address resolved and approved at connect time
+    (``http._pinned_create_connection``). The pre-flight resolution here is
+    therefore a filter, not the guarantee -- the pin is what closes the
+    rebinding window, and removing it would reopen that window.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").strip().strip(".").lower()
+    except ValueError:
+        # urlparse/.hostname raise on a malformed authority such as
+        # "http://[broken/about"; one bad search hit must not abort the probe.
+        return False
+    if not host:
+        return False
+    if "%" in host:
+        # A scope id ("fe80::1%eth0", "::1%1") is a link-local/loopback
+        # address that ipaddress cannot parse, so it would otherwise fall
+        # through to the resolver branch below.
+        return False
+    if host in _LOCAL_HOSTNAMES or host.endswith(_PRIVATE_HOST_SUFFIXES):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # Not a canonical address. Reject non-canonical numeric spellings
+        # ("127.1", "2130706433", "0x7f.1") that ipaddress refuses but the
+        # resolver still accepts -- they can name any address, including ours.
+        try:
+            socket.inet_aton(host)
+        except (OSError, ValueError):
+            return _resolves_to_public(host)
+        return False
+    return _is_public_address(address)
+
+
+def _is_public_address(address: ipaddress._BaseAddress) -> bool:
+    """True only for globally reachable, non-multicast addresses.
+
+    Expressed positively on purpose: ``is_private`` is False for
+    100.64.0.0/10, so a negated list of flags admits the carrier-grade NAT
+    range that holds Alibaba Cloud's metadata endpoint.
+    """
+    return bool(address.is_global) and not address.is_multicast
+
+
+def _resolves_to_public(host: str) -> bool:
+    """False when a hostname resolves to a non-global address.
+
+    A name-only check misses the cheap attack: an attacker-registered domain
+    whose A record points at 127.0.0.1 or a metadata endpoint needs no DNS
+    rebinding at all. Resolution failure counts as reachable -- an
+    unresolvable host cannot be fetched, and keeping the predicate total keeps
+    offline and CI runs independent of DNS.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except UnicodeError:
+        # getaddrinfo raises UnicodeEncodeError (not OSError) for an invalid
+        # label -- >63 characters, for instance. That host can never be
+        # fetched safely, and letting it through means urllib raises the same
+        # error later, outside the handled exceptions, aborting the jobs lane.
+        return False
+    except OSError:
+        # Transient resolution failure: the fetch fails on its own, so the
+        # predicate stays total and offline runs stay DNS-independent.
+        return True
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except (ValueError, IndexError, TypeError):
+            # An address this process cannot classify is not one to fetch.
+            return False
+        if not _is_public_address(address):
+            return False
+    return True
+
+
 def _resolve_careers_page(
     company: str,
     date_range: tuple[str, str],
@@ -142,14 +249,25 @@ def _resolve_careers_page(
 
     for url in candidates:
         with http.expected_misses(403, 404):
-            html = http.get_text(url, accept="text/html", retries=1)
+            # Anyone can own {slug}.com/.ai/.io, so the redirect rule has to
+            # hold here too, not only on the search-derived branch.
+            html = http.get_text(
+                url, accept="text/html", retries=1, validate_url=_is_fetchable_url
+            )
         if html and _looks_like_careers_html(html):
             return html, url
 
     if backend != "none":
         careers_url = _search_for_careers_url(company, date_range, config, backend=backend)
         if careers_url:
-            html = http.get_text(careers_url, accept="text/html", retries=1)
+            # validate_url keeps the public-address rule on every redirect hop,
+            # so a public careers page cannot redirect to link-local metadata.
+            html = http.get_text(
+                careers_url,
+                accept="text/html",
+                retries=1,
+                validate_url=_is_fetchable_url,
+            )
             if html:
                 return html, careers_url
 
@@ -177,10 +295,15 @@ def _search_for_careers_url(
         if not url:
             continue
         lowered = url.lower()
-        if any(token in lowered for token in (
+        if not any(token in lowered for token in (
             "career", "/jobs", "ashbyhq", "greenhouse", "lever.co", "workable", "smartrecruiters",
         )):
-            return url
+            continue
+        # The address check resolves hostnames, so it runs only on candidates
+        # that already look like careers pages -- not once per search result.
+        if not _is_fetchable_url(url):
+            continue
+        return url
     return None
 
 

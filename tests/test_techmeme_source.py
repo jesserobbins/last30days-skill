@@ -44,7 +44,7 @@ def test_search_invokes_only_search_no_sync(monkeypatch):
     and never a `sync` (search hits Techmeme's live archive, not the cache)."""
     calls = []
 
-    def fake_run(cmd, timeout):
+    def fake_run(cmd, timeout, **kwargs):
         calls.append(list(cmd))
         return _FakeProc(stdout=json.dumps([
             {"num": 1, "source": "a.com",
@@ -66,7 +66,7 @@ def _search_with_records(monkeypatch, records, from_date="2026-06-01", to_date="
     monkeypatch.setattr(techmeme, "_is_available", lambda: True)
     monkeypatch.setattr(
         techmeme.subproc, "run_with_timeout",
-        lambda cmd, timeout: _FakeProc(stdout=json.dumps(records)),
+        lambda cmd, timeout, **kwargs: _FakeProc(stdout=json.dumps(records)),
     )
     return techmeme.search_techmeme("topic", from_date, to_date)
 
@@ -152,7 +152,7 @@ def test_dropped_records_logged(monkeypatch):
     monkeypatch.setattr(techmeme, "_log", lambda msg: logs.append(msg))
     monkeypatch.setattr(
         techmeme.subproc, "run_with_timeout",
-        lambda cmd, timeout: _FakeProc(stdout=json.dumps([
+        lambda cmd, timeout, **kwargs: _FakeProc(stdout=json.dumps([
             {"num": 1, "source": "a.com",
              "headline": "Stale story from the deep archive years back",
              "link": "https://t.co/old", "date": "2022-12-02"},
@@ -196,7 +196,7 @@ def test_no_results_prose_parses_as_empty_without_error(monkeypatch):
     monkeypatch.setattr(techmeme, "_log", lambda msg: logs.append(msg))
     monkeypatch.setattr(
         techmeme.subproc, "run_with_timeout",
-        lambda cmd, timeout: _FakeProc(stdout='No results for "whatever query"\n'),
+        lambda cmd, timeout, **kwargs: _FakeProc(stdout='No results for "whatever query"\n'),
     )
     resp = techmeme._run_cli([techmeme.CLI_BIN, "search", "whatever query", "--json"],
                              timeout=techmeme.SEARCH_TIMEOUT)
@@ -213,7 +213,7 @@ def test_malformed_stdout_still_yields_decode_error(monkeypatch):
     monkeypatch.setattr(techmeme, "_log", lambda msg: logs.append(msg))
     monkeypatch.setattr(
         techmeme.subproc, "run_with_timeout",
-        lambda cmd, timeout: _FakeProc(stdout="garbage <<<"),
+        lambda cmd, timeout, **kwargs: _FakeProc(stdout="garbage <<<"),
     )
     resp = techmeme._run_cli([techmeme.CLI_BIN, "search", "topic", "--json"],
                              timeout=techmeme.SEARCH_TIMEOUT)
@@ -295,7 +295,7 @@ def test_depth_cap_truncates_client_side(monkeypatch, depth, cap):
         for i in range(cap + 12)
     ]
     monkeypatch.setattr(techmeme, "_is_available", lambda: True)
-    monkeypatch.setattr(techmeme, "_run_cli", lambda cmd, timeout: {"results": list(records)})
+    monkeypatch.setattr(techmeme, "_run_cli", lambda cmd, timeout, **kwargs: {"results": list(records)})
     out = techmeme.search_techmeme("topic", "2026-06-01", "2026-06-27", depth=depth)
     assert len(out["results"]) == cap
 
@@ -317,7 +317,7 @@ def test_depth_cap_applies_after_windowing(monkeypatch):
     ]
     monkeypatch.setattr(techmeme, "_is_available", lambda: True)
     monkeypatch.setattr(techmeme, "_run_cli",
-                        lambda cmd, timeout: {"results": stale + fresh})
+                        lambda cmd, timeout, **kwargs: {"results": stale + fresh})
     out = techmeme.search_techmeme("topic", "2026-06-01", "2026-06-27", depth="quick")
     links = [r["link"] for r in out["results"]]
     assert links == [f"https://t.co/new{i}" for i in range(cap)]
@@ -340,7 +340,7 @@ def test_dated_records_take_cap_slots_before_undated(monkeypatch):
     monkeypatch.setattr(techmeme, "_is_available", lambda: True)
     # Undated arrive first in CLI order; dated in-window must still win the cap.
     monkeypatch.setattr(techmeme, "_run_cli",
-                        lambda cmd, timeout: {"results": undated + dated})
+                        lambda cmd, timeout, **kwargs: {"results": undated + dated})
     out = techmeme.search_techmeme("topic", "2026-06-01", "2026-06-27", depth="quick")
     links = [r["link"] for r in out["results"]]
     assert links == [f"https://t.co/d{i}" for i in range(cap)]
@@ -358,7 +358,7 @@ def test_all_undated_flood_capped_with_windowing_inactive_hint(monkeypatch):
     ]
     monkeypatch.setattr(techmeme, "_is_available", lambda: True)
     monkeypatch.setattr(techmeme, "_log", lambda msg: logs.append(msg))
-    monkeypatch.setattr(techmeme, "_run_cli", lambda cmd, timeout: {"results": records})
+    monkeypatch.setattr(techmeme, "_run_cli", lambda cmd, timeout, **kwargs: {"results": records})
     out = techmeme.search_techmeme("topic", "2026-06-01", "2026-06-27", depth="quick")
     assert len(out["results"]) == cap
     assert any("date windowing inactive" in m for m in logs)
@@ -370,7 +370,7 @@ def test_windowing_inactive_hint_absent_when_dates_present(monkeypatch):
     logs = []
     monkeypatch.setattr(techmeme, "_is_available", lambda: True)
     monkeypatch.setattr(techmeme, "_log", lambda msg: logs.append(msg))
-    monkeypatch.setattr(techmeme, "_run_cli", lambda cmd, timeout: {"results": [
+    monkeypatch.setattr(techmeme, "_run_cli", lambda cmd, timeout, **kwargs: {"results": [
         {"num": 1, "source": "a.com", "headline": "Stale but properly dated archive story",
          "link": "https://t.co/old", "date": "2022-12-02"},
         {"num": 2, "source": "b.com", "headline": "Undated companion record from mixed output",
